@@ -1,0 +1,10 @@
+config/*
+!config/.gitkeep
+*.db
+*.db-journal
+*.db-wal
+__pycache__/
+*.pyc
+.venv/
+dist/
+*.egg-info/

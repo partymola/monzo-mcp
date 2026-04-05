@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "monzo-mcp"
+version = "0.1.0"
+description = "MCP server for the Monzo banking API with OAuth, local transaction cache, and spending analysis."
+readme = "README.md"
+license = "GPL-3.0-or-later"
+requires-python = ">=3.13"
+keywords = ["monzo", "mcp", "model-context-protocol", "banking", "finance"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial",
+]
+dependencies = [
+    "mcp>=1.6.0",
+]
+
+[project.scripts]
+monzo-mcp = "main:main"
+
+[project.urls]
+Repository = "https://github.com/partymola/monzo-mcp"
+Issues = "https://github.com/partymola/monzo-mcp/issues"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.5",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

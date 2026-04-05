@@ -1,0 +1,74 @@
+# Monzo MCP Server
+
+MCP server for Monzo banking API. Read-only tools with OAuth auto-refresh and local transaction cache.
+
+## Quick Reference
+
+```
+monzo-mcp auth          # Interactive OAuth setup (browser + Monzo app approval)
+monzo-mcp               # Start MCP server (stdio transport, used by Claude Code)
+```
+
+## Tools
+
+| Tool | Source | Purpose |
+|------|--------|---------|
+| `monzo_list_accounts` | Live API | Account IDs, types, status |
+| `monzo_get_balance` | Live API | Balance + spend_today (also saves snapshot) |
+| `monzo_list_pots` | Live API | Pot names and balances (also saves snapshots) |
+| `monzo_sync` | Live API -> SQLite | Sync transactions with pagination, SCA fallback, dedup |
+| `monzo_list_transactions` | Cache | Filter by date, category, merchant, account |
+| `monzo_search_transactions` | Cache | Full-text search across merchant, description, notes |
+| `monzo_spending` | Cache | Category breakdown, top merchants, month-over-month |
+
+## Architecture
+
+- **Entry point**: `src/main.py` - routes `auth` subcommand or starts MCP stdio server
+- **FastMCP**: `mcp_instance.py` creates the shared `FastMCP("monzo-server")` instance
+- **Auth**: `auth.py` - OAuth setup CLI + token refresh (5-min expiry buffer)
+- **API**: `api.py` - GET wrapper with auto-refresh, typed exceptions
+- **DB**: `db.py` - SQLite schema, `get_db()`, balance/sync helpers
+- **Tools**: `tools/account_tools.py`, `tools/transaction_tools.py`, `tools/analysis_tools.py`
+
+## Auth & Credentials
+
+- OAuth client registered at https://developers.monzo.com
+- Redirect URL: `http://localhost:6600/callback`
+- Credentials in `config/monzo_client.json` and `config/monzo_tokens.json` (gitignored)
+- Token auto-refreshes with 5-minute buffer before expiry
+- SCA window: 5 min after app approval for full history, then 90 days only
+
+## Database
+
+SQLite at `monzo.db` (gitignored). Tables:
+- `monzo_transactions` - id, account_id, account_type, created, amount (pence), currency, description, merchant_name, category, notes, settled
+- `balances` - time-series snapshots (account_type, name, balance in pence, captured_at)
+- `sync_log` - sync history with timestamps and record counts
+
+Amounts stored in pence (integers), converted to pounds only in tool responses.
+
+## Auth-hold dedup
+
+After syncing, duplicate unsettled transactions are removed when a matching settled transaction exists (same merchant, amount, account, within ~15 min). Both-settled pairs are kept as genuine separate charges.
+
+## Key patterns
+
+- All tools are `async def` with `@mcp.tool()` + `@require_auth` decorators
+- Sync HTTP calls wrapped in `anyio.to_thread.run_sync()` to avoid blocking
+- Account ID resolution: tools look up account_id from a live `/accounts` call
+- Config paths from env vars (`MONZO_MCP_CONFIG_DIR`, `MONZO_MCP_DB_PATH`) with fallback to package-relative paths
+
+## Running tests
+
+```bash
+cd monzo-mcp
+.venv/bin/python -m pytest tests/ -v
+```
+
+## Troubleshooting
+
+- **"Monzo not configured"**: Run `monzo-mcp auth`
+- **"Token refresh failed"**: Re-run `monzo-mcp auth` (refresh token may have expired)
+- **"SCA required"**: Open Monzo app, approve the login, then re-sync
+- **Empty transaction list**: Run `monzo_sync` first to populate the cache
+- **Python 3.14 issues**: Use Python 3.13 (pydantic-core compatibility)
