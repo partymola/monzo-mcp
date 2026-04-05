@@ -1,6 +1,19 @@
 # Monzo MCP Server
 
+**This is a public open-source repository.** Do not commit personal or financial data.
+
 MCP server for Monzo banking API. Read-only tools with OAuth auto-refresh and local transaction cache.
+
+## Data Safety Rules
+
+This repo is public. Every commit, PR, and file is visible to anyone. Before committing ANY change:
+
+- **No real financial data** in code, tests, or docs - no real transaction amounts, balances, account IDs, or merchant names that could identify a user
+- **No personal identifiers** - no real names, addresses, boroughs, postcodes, email addresses, or phone numbers
+- **No credentials** - no OAuth tokens, client secrets, API keys, or session data
+- **Test fixtures must use fictional data** - use obviously fake merchants ("Acme Housing", "Coffee Shop"), round amounts (-15000, -2500), and generic descriptions ("Childcare", "Top-up")
+- **Error messages must not leak secrets** - API error responses from Monzo may contain account-specific data; never include raw response bodies in exceptions or logs that could reach committed code
+- **The `config/` directory and `*.db` files are gitignored for a reason** - never override this
 
 ## Quick Reference
 
