@@ -1,7 +1,7 @@
 """SQLite database for Monzo transaction cache and balance history."""
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, date, timezone
 
 from .config import DB_PATH
 
@@ -77,3 +77,13 @@ def log_sync(db: sqlite3.Connection, status: str, records_added: int,
         (datetime.now(timezone.utc).isoformat(), status, records_added, notes),
     )
     db.commit()
+
+
+def get_last_sync_time(db: sqlite3.Connection) -> str | None:
+    """Return the ISO timestamp of the most recent successful sync, or None."""
+    row = db.execute(
+        "SELECT MAX(synced_at) AS t FROM sync_log WHERE status = 'ok'"
+    ).fetchone()
+    if row and row["t"]:
+        return row["t"]
+    return None

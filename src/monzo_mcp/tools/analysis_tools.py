@@ -7,6 +7,7 @@ import anyio
 from ..mcp_instance import mcp
 from ..helpers import format_response, require_auth, pence_to_pounds
 from ..db import get_db
+from .transaction_tools import auto_sync_if_stale
 
 
 @mcp.tool()
@@ -17,9 +18,7 @@ async def monzo_spending(
     account_type: str | None = None,
     detail: bool = False,
 ) -> str:
-    """Analyse spending from cached Monzo transactions.
-
-    Run monzo_sync first to populate/update the cache.
+    """Analyse spending from cached Monzo transactions. Auto-syncs if the cache is stale (last sync before today).
 
     Args:
         month: Month in YYYY-MM format (default: current month)
@@ -28,12 +27,13 @@ async def monzo_spending(
         detail: If true, return individual transactions instead of category summary
     """
     def _analyse():
+        auto_sync_if_stale()
         db = get_db()
         try:
             count = db.execute("SELECT COUNT(*) FROM monzo_transactions").fetchone()[0]
             if count == 0:
                 return format_response({
-                    "error": "No transaction data. Run monzo_sync first to populate the cache."
+                    "error": "No transaction data available. Check your Monzo auth with `monzo-mcp auth`."
                 })
 
             target_month = month or date.today().strftime("%Y-%m")

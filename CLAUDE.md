@@ -30,9 +30,9 @@ monzo-mcp               # Start MCP server (stdio transport, used by Claude Code
 | `monzo_get_balance` | Live API | Balance + spend_today (also saves snapshot) |
 | `monzo_list_pots` | Live API | Pot names and balances (also saves snapshots) |
 | `monzo_sync` | Live API -> SQLite | Sync transactions with pagination, SCA fallback, dedup |
-| `monzo_list_transactions` | Cache | Filter by date, category, merchant, account |
-| `monzo_search_transactions` | Cache | Full-text search across merchant, description, notes |
-| `monzo_spending` | Cache | Category breakdown, top merchants, month-over-month |
+| `monzo_list_transactions` | Cache (auto-sync) | Filter by date, category, merchant, account |
+| `monzo_search_transactions` | Cache (auto-sync) | Full-text search across merchant, description, notes |
+| `monzo_spending` | Cache (auto-sync) | Category breakdown, top merchants, month-over-month |
 
 ## Architecture
 
@@ -84,4 +84,4 @@ cd monzo-mcp
 - **"Token refresh failed"**: Re-run `monzo-mcp auth` (refresh token may have expired)
 - **"SCA required"**: Open Monzo app, approve the login, then re-sync
 - **Empty transaction list**: Run `monzo_sync` first to populate the cache
-- **Python 3.14 issues**: Use Python 3.13 (pydantic-core compatibility)
+- **Python 3.13+ required**. Python 3.14 now works (pydantic-core 2.45.0+ has 3.14 wheels).
