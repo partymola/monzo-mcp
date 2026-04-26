@@ -3,6 +3,7 @@
 [![CI](https://github.com/partymola/monzo-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/partymola/monzo-mcp/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
+[![Glama MCP Server](https://glama.ai/mcp/servers/partymola/monzo-mcp/badges/score.svg)](https://glama.ai/mcp/servers/partymola/monzo-mcp)
 
 MCP server for the [Monzo](https://monzo.com) banking API. Read-only access to accounts, balances, pots, transactions, and spending analysis - all through Claude Code or any MCP client.
 
