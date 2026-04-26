@@ -13,12 +13,16 @@ keywords = ["monzo", "mcp", "model-context-protocol", "banking", "finance"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
     "Programming Language :: Python :: 3.13",
     "Topic :: Office/Business :: Financial",
 ]
 dependencies = [
     "mcp>=1.6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.5",
 ]
 
 [project.scripts]
@@ -27,11 +31,6 @@ monzo-mcp = "main:main"
 [project.urls]
 Repository = "https://github.com/partymola/monzo-mcp"
 Issues = "https://github.com/partymola/monzo-mcp/issues"
-
-[dependency-groups]
-dev = [
-    "pytest>=8.3.5",
-]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

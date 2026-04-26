@@ -1,5 +1,9 @@
 # monzo-mcp
 
+[![CI](https://github.com/partymola/monzo-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/partymola/monzo-mcp/actions/workflows/ci.yml)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
+
 MCP server for the [Monzo](https://monzo.com) banking API. Read-only access to accounts, balances, pots, transactions, and spending analysis - all through Claude Code or any MCP client.
 
 Unlike other Monzo MCP implementations that use raw bearer tokens (which expire in 6 hours), this server handles **full OAuth with automatic token refresh**.
@@ -92,6 +96,10 @@ The local SQLite cache preserves all synced transactions permanently, so run `mo
 - **Monzo API itself** cannot send money to external accounts
 - Tokens stored as JSON files in the `config/` directory (gitignored)
 - All API calls are GET requests with Bearer token auth
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, the test workflow, and the pre-commit hook. Changes are tracked in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
