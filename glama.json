@@ -1,0 +1,6 @@
+{
+  "$schema": "https://glama.ai/mcp/schemas/server.json",
+  "maintainers": ["partymola"],
+  "name": "monzo-mcp",
+  "description": "Provides read-only access to Monzo banking accounts, balances, pots, and transactions with automatic OAuth token refresh and persistent local SQLite caching. Enables spending analysis with category breakdowns and transaction search across cached historical data beyond Monzo's 90-day access window."
+}
