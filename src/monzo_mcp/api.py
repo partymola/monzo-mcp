@@ -45,3 +45,5 @@ def get(path: str) -> dict:
         raise MonzoAPIError(f"Monzo API error {e.code}") from e
     except urllib.error.URLError as e:
         raise MonzoAPIError(f"Network error: {e}") from e
+
+// Contributed via automated bounty system
