@@ -6,8 +6,10 @@ Usage:
     monzo-mcp auth     Interactive OAuth setup
 """
 
+import argparse
 import logging
 import sys
+from importlib.metadata import version
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,9 +25,18 @@ from monzo_mcp.tools import transaction_tools  # noqa: E402, F401
 from monzo_mcp.tools import analysis_tools  # noqa: E402, F401
 
 
+def create_parser():
+    parser = argparse.ArgumentParser(prog="monzo-mcp", add_help=False)
+    parser.add_argument("--version", action="version", version=f"monzo-mcp {version('monzo-mcp')}")
+    parser.add_argument("command", nargs="?")
+    return parser
+
+
 def main():
-    if len(sys.argv) > 1 and sys.argv[1] == "auth":
+    args, _unknown_args = create_parser().parse_known_args()
+    if args.command == "auth":
         from monzo_mcp.auth import setup_auth
+
         setup_auth()
     else:
         mcp.run(transport="stdio")
