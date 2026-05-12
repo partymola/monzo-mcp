@@ -37,12 +37,20 @@ Please install it before your first commit.
 
 Tests are fully offline - no real API calls, no real tokens. Fixtures use fictional merchants and round amounts; never paste real transaction data into tests.
 
+### Run lint checks
+
+```bash
+.venv/bin/python -m ruff check src tests
+.venv/bin/python -m ruff format --check src tests
+```
+
 ## Making changes
 
 - **Open an issue first** for non-trivial changes (new tools, schema migrations, new endpoints, breaking changes). Small fixes (typos, bug fixes, docs) can go straight to a PR.
 - Keep PRs small and focused.
 - Add or update tests for any behaviour change.
 - This server is intentionally read-only - PRs that add write tools (sending money, moving pots, modifying transactions) will not be accepted.
+- Run `ruff check src tests` and `ruff format --check src tests` before opening a PR.
 - Run `pytest tests/ -v` before opening a PR.
 
 ## Pull requests

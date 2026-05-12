@@ -23,6 +23,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3.5",
+    "ruff>=0.6",
 ]
 
 [project.scripts]
@@ -34,3 +35,13 @@ Issues = "https://github.com/partymola/monzo-mcp/issues"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/main.py" = ["E402"]
