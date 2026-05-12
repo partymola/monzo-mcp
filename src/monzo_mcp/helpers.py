@@ -37,11 +37,15 @@ def validate_account_type(account_type: str | None) -> str | None:
 
 def require_auth(func):
     """Decorator that checks credentials exist before calling a tool."""
+
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
         if not MONZO_CLIENT_PATH.exists() or not MONZO_TOKENS_PATH.exists():
-            return json.dumps({
-                "error": "Monzo not configured. Run: monzo-mcp auth",
-            })
+            return json.dumps(
+                {
+                    "error": "Monzo not configured. Run: monzo-mcp auth",
+                }
+            )
         return await func(*args, **kwargs)
+
     return wrapper
