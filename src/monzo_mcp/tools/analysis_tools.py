@@ -4,9 +4,9 @@ from datetime import date, timedelta
 
 import anyio
 
-from ..mcp_instance import mcp
-from ..helpers import format_response, require_auth, pence_to_pounds
 from ..db import get_db
+from ..helpers import format_response, pence_to_pounds, require_auth
+from ..mcp_instance import mcp
 from .transaction_tools import auto_sync_if_stale
 
 
@@ -18,7 +18,9 @@ async def monzo_spending(
     account_type: str | None = None,
     detail: bool = False,
 ) -> str:
-    """Analyse spending from cached Monzo transactions. Auto-syncs if the cache is stale (last sync before today).
+    """Analyse spending from cached Monzo transactions.
+
+    Auto-syncs if the cache is stale (last sync before today).
 
     Args:
         month: Month in YYYY-MM format (default: current month)
@@ -26,15 +28,21 @@ async def monzo_spending(
         account_type: "personal" or "joint" (default: all)
         detail: If true, return individual transactions instead of category summary
     """
+
     def _analyse():
         auto_sync_if_stale()
         db = get_db()
         try:
             count = db.execute("SELECT COUNT(*) FROM monzo_transactions").fetchone()[0]
             if count == 0:
-                return format_response({
-                    "error": "No transaction data available. Check your Monzo auth with `monzo-mcp auth`."
-                })
+                return format_response(
+                    {
+                        "error": (
+                            "No transaction data available. Check your Monzo auth "
+                            "with `monzo-mcp auth`."
+                        )
+                    }
+                )
 
             target_month = month or date.today().strftime("%Y-%m")
 
@@ -66,21 +74,25 @@ async def monzo_spending(
                 for r in rows:
                     amt = pence_to_pounds(r["amount"])
                     total += amt
-                    transactions.append({
-                        "date": r["created"][:10],
-                        "amount": amt,
-                        "description": r["description"],
-                        "merchant": r["merchant_name"],
-                        "category": r["category"],
-                        "account_type": r["account_type"],
-                    })
+                    transactions.append(
+                        {
+                            "date": r["created"][:10],
+                            "amount": amt,
+                            "description": r["description"],
+                            "merchant": r["merchant_name"],
+                            "category": r["category"],
+                            "account_type": r["account_type"],
+                        }
+                    )
 
-                return format_response({
-                    "month": target_month,
-                    "transactions": transactions,
-                    "count": len(transactions),
-                    "total": round(total, 2),
-                })
+                return format_response(
+                    {
+                        "month": target_month,
+                        "transactions": transactions,
+                        "count": len(transactions),
+                        "total": round(total, 2),
+                    }
+                )
 
             rows = db.execute(
                 f"""SELECT category, COUNT(*) as cnt, SUM(amount) as total
@@ -97,11 +109,13 @@ async def monzo_spending(
             for row in rows:
                 total = abs(pence_to_pounds(row["total"]))
                 grand_total += total
-                categories.append({
-                    "category": row["category"] or "(uncategorised)",
-                    "count": row["cnt"],
-                    "total": round(total, 2),
-                })
+                categories.append(
+                    {
+                        "category": row["category"] or "(uncategorised)",
+                        "count": row["cnt"],
+                        "total": round(total, 2),
+                    }
+                )
 
             merchants = db.execute(
                 f"""SELECT merchant_name, COUNT(*) as cnt, SUM(amount) as total
@@ -112,11 +126,13 @@ async def monzo_spending(
 
             top_merchants = []
             for m in merchants:
-                top_merchants.append({
-                    "merchant": m["merchant_name"],
-                    "count": m["cnt"],
-                    "total": round(abs(pence_to_pounds(m["total"])), 2),
-                })
+                top_merchants.append(
+                    {
+                        "merchant": m["merchant_name"],
+                        "count": m["cnt"],
+                        "total": round(abs(pence_to_pounds(m["total"])), 2),
+                    }
+                )
 
             result = {
                 "month": target_month,
@@ -128,7 +144,10 @@ async def monzo_spending(
             if not month:
                 prev_month = (date.today().replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
                 prev_total_row = db.execute(
-                    "SELECT SUM(amount) FROM monzo_transactions WHERE amount < 0 AND created LIKE ?",
+                    (
+                        "SELECT SUM(amount) FROM monzo_transactions "
+                        "WHERE amount < 0 AND created LIKE ?"
+                    ),
                     (f"{prev_month}%",),
                 ).fetchone()[0]
 

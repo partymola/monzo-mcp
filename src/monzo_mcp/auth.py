@@ -7,12 +7,16 @@ import urllib.error
 import urllib.request
 import webbrowser
 from datetime import datetime, timezone
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs, urlencode
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from .config import (
-    CONFIG_DIR, MONZO_CLIENT_PATH, MONZO_TOKENS_PATH,
-    MONZO_AUTH_URL, MONZO_TOKEN_URL, MONZO_CALLBACK_PORT,
+    CONFIG_DIR,
+    MONZO_AUTH_URL,
+    MONZO_CALLBACK_PORT,
+    MONZO_CLIENT_PATH,
+    MONZO_TOKEN_URL,
+    MONZO_TOKENS_PATH,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,12 +55,14 @@ def refresh_token() -> str:
         logger.error("Token expired and no refresh token. Run: monzo-mcp auth")
         raise RuntimeError("Token expired and no refresh token. Run: monzo-mcp auth")
 
-    data = urlencode({
-        "grant_type": "refresh_token",
-        "client_id": _cached_creds["client_id"],
-        "client_secret": _cached_creds["client_secret"],
-        "refresh_token": _cached_tokens["refresh_token"],
-    }).encode()
+    data = urlencode(
+        {
+            "grant_type": "refresh_token",
+            "client_id": _cached_creds["client_id"],
+            "client_secret": _cached_creds["client_secret"],
+            "refresh_token": _cached_tokens["refresh_token"],
+        }
+    ).encode()
 
     req = urllib.request.Request(MONZO_TOKEN_URL, data=data, method="POST")
     try:
@@ -102,12 +108,18 @@ def setup_auth():
 
     state = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
     redirect_uri = f"http://localhost:{MONZO_CALLBACK_PORT}/callback"
-    auth_url = MONZO_AUTH_URL + "?" + urlencode({
-        "client_id": creds["client_id"],
-        "redirect_uri": redirect_uri,
-        "response_type": "code",
-        "state": state,
-    })
+    auth_url = (
+        MONZO_AUTH_URL
+        + "?"
+        + urlencode(
+            {
+                "client_id": creds["client_id"],
+                "redirect_uri": redirect_uri,
+                "response_type": "code",
+                "state": state,
+            }
+        )
+    )
 
     auth_code = None
 
@@ -129,7 +141,7 @@ def setup_auth():
         def log_message(self, format, *a):
             pass
 
-    print(f"\nOpening browser for Monzo auth...")
+    print("\nOpening browser for Monzo auth...")
     print(f"URL: {auth_url}\n")
     webbrowser.open(auth_url)
 
@@ -141,13 +153,15 @@ def setup_auth():
         print("Error: no auth code received.", file=sys.stderr)
         sys.exit(1)
 
-    token_data = urlencode({
-        "grant_type": "authorization_code",
-        "client_id": creds["client_id"],
-        "client_secret": creds["client_secret"],
-        "redirect_uri": redirect_uri,
-        "code": auth_code,
-    }).encode()
+    token_data = urlencode(
+        {
+            "grant_type": "authorization_code",
+            "client_id": creds["client_id"],
+            "client_secret": creds["client_secret"],
+            "redirect_uri": redirect_uri,
+            "code": auth_code,
+        }
+    ).encode()
 
     req = urllib.request.Request(MONZO_TOKEN_URL, data=token_data, method="POST")
     try:

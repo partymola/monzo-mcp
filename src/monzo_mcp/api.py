@@ -30,10 +30,13 @@ def get(path: str) -> dict:
     """
     token = refresh_token()
     url = f"{MONZO_API_BASE}{path}"
-    req = urllib.request.Request(url, headers={
-        "Authorization": f"Bearer {token}",
-        "User-Agent": "monzo-mcp/0.1",
-    })
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "monzo-mcp/0.1",
+        },
+    )
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(resp.read().decode())

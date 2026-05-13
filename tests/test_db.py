@@ -3,7 +3,7 @@
 import sqlite3
 import unittest
 
-from monzo_mcp.db import SCHEMA, save_balance, log_sync
+from monzo_mcp.db import SCHEMA, log_sync, save_balance
 
 
 def make_test_db():
@@ -16,18 +16,18 @@ def make_test_db():
 class TestSchema(unittest.TestCase):
     def test_creates_all_tables(self):
         db = make_test_db()
-        tables = {r[0] for r in db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()}
+        tables = {
+            r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
         self.assertIn("monzo_transactions", tables)
         self.assertIn("balances", tables)
         self.assertIn("sync_log", tables)
 
     def test_creates_indexes(self):
         db = make_test_db()
-        indexes = {r[0] for r in db.execute(
-            "SELECT name FROM sqlite_master WHERE type='index'"
-        ).fetchall()}
+        indexes = {
+            r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()
+        }
         self.assertIn("idx_txn_created", indexes)
         self.assertIn("idx_txn_account_type", indexes)
         self.assertIn("idx_txn_category", indexes)

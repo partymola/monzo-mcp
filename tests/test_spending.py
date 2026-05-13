@@ -11,21 +11,118 @@ def make_test_db_with_transactions():
     db.row_factory = sqlite3.Row
     db.executescript(SCHEMA)
     txns = [
-        ("tx_001", "acc_1", "joint", "2026-02-05T10:00:00Z", -150000, "GBP", "REF-001", "Acme Housing", "bills", "", "2026-02-05"),
-        ("tx_002", "acc_1", "joint", "2026-02-05T10:01:00Z", -20000, "GBP", "REF-002", "Local Council", "bills", "", "2026-02-05"),
-        ("tx_003", "acc_1", "joint", "2026-02-07T12:00:00Z", -50000, "GBP", "Childcare", None, "general", "", "2026-02-07"),
-        ("tx_004", "acc_1", "joint", "2026-02-07T12:01:00Z", -25000, "GBP", "Childcare", None, "general", "", "2026-02-07"),
-        ("tx_005", "acc_2", "personal", "2026-02-10T14:00:00Z", -4500, "GBP", "Sparkle Clean", "Sparkle Cleaning", "shopping", "", "2026-02-10"),
-        ("tx_006", "acc_1", "joint", "2026-02-15T18:00:00Z", -2500, "GBP", "FOOD APP", "Food App", "eating_out", "", "2026-02-15"),
-        ("tx_007", "acc_1", "joint", "2026-02-02T03:00:00Z", 500000, "GBP", "Top-up", None, "general", "", "2026-02-02"),
-        ("tx_008", "acc_1", "joint", "2026-01-15T10:00:00Z", -1800, "GBP", "FOOD APP", "Food App", "eating_out", "", "2026-01-15"),
+        (
+            "tx_001",
+            "acc_1",
+            "joint",
+            "2026-02-05T10:00:00Z",
+            -150000,
+            "GBP",
+            "REF-001",
+            "Acme Housing",
+            "bills",
+            "",
+            "2026-02-05",
+        ),
+        (
+            "tx_002",
+            "acc_1",
+            "joint",
+            "2026-02-05T10:01:00Z",
+            -20000,
+            "GBP",
+            "REF-002",
+            "Local Council",
+            "bills",
+            "",
+            "2026-02-05",
+        ),
+        (
+            "tx_003",
+            "acc_1",
+            "joint",
+            "2026-02-07T12:00:00Z",
+            -50000,
+            "GBP",
+            "Childcare",
+            None,
+            "general",
+            "",
+            "2026-02-07",
+        ),
+        (
+            "tx_004",
+            "acc_1",
+            "joint",
+            "2026-02-07T12:01:00Z",
+            -25000,
+            "GBP",
+            "Childcare",
+            None,
+            "general",
+            "",
+            "2026-02-07",
+        ),
+        (
+            "tx_005",
+            "acc_2",
+            "personal",
+            "2026-02-10T14:00:00Z",
+            -4500,
+            "GBP",
+            "Sparkle Clean",
+            "Sparkle Cleaning",
+            "shopping",
+            "",
+            "2026-02-10",
+        ),
+        (
+            "tx_006",
+            "acc_1",
+            "joint",
+            "2026-02-15T18:00:00Z",
+            -2500,
+            "GBP",
+            "FOOD APP",
+            "Food App",
+            "eating_out",
+            "",
+            "2026-02-15",
+        ),
+        (
+            "tx_007",
+            "acc_1",
+            "joint",
+            "2026-02-02T03:00:00Z",
+            500000,
+            "GBP",
+            "Top-up",
+            None,
+            "general",
+            "",
+            "2026-02-02",
+        ),
+        (
+            "tx_008",
+            "acc_1",
+            "joint",
+            "2026-01-15T10:00:00Z",
+            -1800,
+            "GBP",
+            "FOOD APP",
+            "Food App",
+            "eating_out",
+            "",
+            "2026-01-15",
+        ),
     ]
     for tx in txns:
         db.execute(
             """INSERT INTO monzo_transactions
                (id, account_id, account_type, created, amount, currency,
                 description, merchant_name, category, notes, settled)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", tx,
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            tx,
         )
     db.commit()
     return db
@@ -52,11 +149,13 @@ class TestSpendingQueries(unittest.TestCase):
 
     def test_spending_excludes_income(self):
         total = self.db.execute(
-            "SELECT SUM(amount) FROM monzo_transactions WHERE amount < 0 AND created LIKE '2026-02%'"
+            "SELECT SUM(amount) FROM monzo_transactions "
+            "WHERE amount < 0 AND created LIKE '2026-02%'"
         ).fetchone()[0]
         self.assertTrue(total < 0)
         income = self.db.execute(
-            "SELECT SUM(amount) FROM monzo_transactions WHERE amount > 0 AND created LIKE '2026-02%'"
+            "SELECT SUM(amount) FROM monzo_transactions "
+            "WHERE amount > 0 AND created LIKE '2026-02%'"
         ).fetchone()[0]
         self.assertEqual(income, 500000)
 
@@ -94,13 +193,15 @@ class TestAuthHoldDedup(unittest.TestCase):
                (id, account_id, account_type, created, amount, currency,
                 description, merchant_name, category, notes, settled)
                VALUES ('tx_a', 'acc_1', 'joint', '2026-02-05T10:00:00Z', -500, 'GBP',
-                       'test', 'Coffee Shop', 'eating_out', '', '2026-02-05')""")
+                       'test', 'Coffee Shop', 'eating_out', '', '2026-02-05')"""
+        )
         db.execute(
             """INSERT INTO monzo_transactions
                (id, account_id, account_type, created, amount, currency,
                 description, merchant_name, category, notes, settled)
                VALUES ('tx_b', 'acc_1', 'joint', '2026-02-05T10:05:00Z', -500, 'GBP',
-                       'test', 'Coffee Shop', 'eating_out', '', '')""")
+                       'test', 'Coffee Shop', 'eating_out', '', '')"""
+        )
         db.commit()
 
         dupes = db.execute("""
@@ -132,13 +233,15 @@ class TestAuthHoldDedup(unittest.TestCase):
                (id, account_id, account_type, created, amount, currency,
                 description, merchant_name, category, notes, settled)
                VALUES ('tx_a', 'acc_1', 'joint', '2026-02-05T10:00:00Z', -500, 'GBP',
-                       'test', 'Coffee Shop', 'eating_out', '', '2026-02-05')""")
+                       'test', 'Coffee Shop', 'eating_out', '', '2026-02-05')"""
+        )
         db.execute(
             """INSERT INTO monzo_transactions
                (id, account_id, account_type, created, amount, currency,
                 description, merchant_name, category, notes, settled)
                VALUES ('tx_b', 'acc_1', 'joint', '2026-02-05T10:05:00Z', -500, 'GBP',
-                       'test', 'Coffee Shop', 'eating_out', '', '2026-02-06')""")
+                       'test', 'Coffee Shop', 'eating_out', '', '2026-02-06')"""
+        )
         db.commit()
 
         dupes = db.execute("""

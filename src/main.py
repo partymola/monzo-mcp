@@ -18,14 +18,17 @@ logging.basicConfig(
 from monzo_mcp.mcp_instance import mcp  # noqa: E402
 
 # Import tool modules - decorators register them with the mcp instance
-from monzo_mcp.tools import account_tools  # noqa: E402, F401
-from monzo_mcp.tools import transaction_tools  # noqa: E402, F401
-from monzo_mcp.tools import analysis_tools  # noqa: E402, F401
+from monzo_mcp.tools import (
+    account_tools,  # noqa: E402, F401
+    analysis_tools,  # noqa: E402, F401
+    transaction_tools,  # noqa: E402, F401
+)
 
 
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "auth":
         from monzo_mcp.auth import setup_auth
+
         setup_auth()
     else:
         mcp.run(transport="stdio")

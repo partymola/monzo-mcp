@@ -1,7 +1,7 @@
 """SQLite database for Monzo transaction cache and balance history."""
 
 import sqlite3
-from datetime import datetime, date, timezone
+from datetime import datetime, timezone
 
 from .config import DB_PATH
 
@@ -56,24 +56,32 @@ def get_db() -> sqlite3.Connection:
     return db
 
 
-def save_balance(db: sqlite3.Connection, account_type: str, name: str,
-                 balance_pence: int, currency: str = "GBP"):
+def save_balance(
+    db: sqlite3.Connection,
+    account_type: str,
+    name: str,
+    balance_pence: int,
+    currency: str = "GBP",
+):
     """Record a balance snapshot."""
     db.execute(
         "INSERT INTO balances (account_type, name, balance, currency, captured_at) "
         "VALUES (?, ?, ?, ?, ?)",
-        (account_type, name, balance_pence, currency,
-         datetime.now(timezone.utc).isoformat()),
+        (
+            account_type,
+            name,
+            balance_pence,
+            currency,
+            datetime.now(timezone.utc).isoformat(),
+        ),
     )
     db.commit()
 
 
-def log_sync(db: sqlite3.Connection, status: str, records_added: int,
-             notes: str = ""):
+def log_sync(db: sqlite3.Connection, status: str, records_added: int, notes: str = ""):
     """Record a sync event."""
     db.execute(
-        "INSERT INTO sync_log (synced_at, status, records_added, notes) "
-        "VALUES (?, ?, ?, ?)",
+        "INSERT INTO sync_log (synced_at, status, records_added, notes) VALUES (?, ?, ?, ?)",
         (datetime.now(timezone.utc).isoformat(), status, records_added, notes),
     )
     db.commit()
@@ -81,9 +89,7 @@ def log_sync(db: sqlite3.Connection, status: str, records_added: int,
 
 def get_last_sync_time(db: sqlite3.Connection) -> str | None:
     """Return the ISO timestamp of the most recent successful sync, or None."""
-    row = db.execute(
-        "SELECT MAX(synced_at) AS t FROM sync_log WHERE status = 'ok'"
-    ).fetchone()
+    row = db.execute("SELECT MAX(synced_at) AS t FROM sync_log WHERE status = 'ok'").fetchone()
     if row and row["t"]:
         return row["t"]
     return None

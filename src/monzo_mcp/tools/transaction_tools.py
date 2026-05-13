@@ -1,15 +1,14 @@
 """Transaction sync, listing, and search tools."""
 
-import sqlite3
-from datetime import datetime, date, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import anyio
 
-from ..mcp_instance import mcp
-from ..helpers import format_response, require_auth, pence_to_pounds
 from .. import api
-from ..api import MonzoSCAError, MonzoAPIError
-from ..db import get_db, save_balance, log_sync, get_last_sync_time
+from ..api import MonzoAPIError, MonzoSCAError
+from ..db import get_db, get_last_sync_time, log_sync, save_balance
+from ..helpers import format_response, pence_to_pounds, require_auth
+from ..mcp_instance import mcp
 
 
 def _format_transaction(row) -> dict:
@@ -63,7 +62,13 @@ def run_sync(account_type: str | None = None) -> dict:
 
             try:
                 bal = api.get(f"/balance?account_id={acct_id}")
-                save_balance(db, atype, f"Monzo {atype.title()}", bal["balance"], bal.get("currency", "GBP"))
+                save_balance(
+                    db,
+                    atype,
+                    f"Monzo {atype.title()}",
+                    bal["balance"],
+                    bal.get("currency", "GBP"),
+                )
                 detail["balance"] = pence_to_pounds(bal["balance"])
             except Exception as e:
                 detail["balance_error"] = str(e)
@@ -73,13 +78,21 @@ def run_sync(account_type: str | None = None) -> dict:
                 pot_count = 0
                 for pot in pots_data.get("pots", []):
                     if not pot.get("deleted"):
-                        save_balance(db, atype, pot["name"], pot["balance"], pot.get("currency", "GBP"))
+                        save_balance(
+                            db,
+                            atype,
+                            pot["name"],
+                            pot["balance"],
+                            pot.get("currency", "GBP"),
+                        )
                         pot_count += 1
                 detail["pots_synced"] = pot_count
             except Exception as e:
                 detail["pots_error"] = str(e)
 
-            since = (datetime.now(timezone.utc) - timedelta(days=335)).strftime("%Y-%m-%dT00:00:00Z")
+            since = (datetime.now(timezone.utc) - timedelta(days=335)).strftime(
+                "%Y-%m-%dT00:00:00Z"
+            )
             added = 0
             page = 0
 
@@ -123,10 +136,16 @@ def run_sync(account_type: str | None = None) -> dict:
                             description, merchant_name, category, notes, settled)
                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (
-                            tx["id"], acct_id, atype, tx["created"],
-                            tx["amount"], tx["currency"],
-                            tx.get("description", ""), merchant_name,
-                            tx.get("category", ""), tx.get("notes", ""),
+                            tx["id"],
+                            acct_id,
+                            atype,
+                            tx["created"],
+                            tx["amount"],
+                            tx["currency"],
+                            tx.get("description", ""),
+                            merchant_name,
+                            tx.get("category", ""),
+                            tx.get("notes", ""),
                             tx.get("settled", ""),
                         ),
                     )
@@ -179,7 +198,10 @@ def run_sync(account_type: str | None = None) -> dict:
 
 
 def auto_sync_if_stale() -> None:
-    """Run an incremental sync if the cache has not been synced today. Silently swallows all errors."""
+    """Run an incremental sync if the cache has not been synced today.
+
+    Silently swallows all errors.
+    """
     try:
         last_sync = get_last_sync_time(get_db())
         today = date.today().isoformat()
@@ -215,7 +237,9 @@ async def monzo_list_transactions(
     merchant: str | None = None,
     limit: int = 50,
 ) -> str:
-    """List transactions from the local cache. Auto-syncs if the cache is stale (last sync before today).
+    """List transactions from the local cache.
+
+    Auto-syncs if the cache is stale (last sync before today).
 
     Queries the synced transaction database, not the live API.
 
@@ -227,15 +251,21 @@ async def monzo_list_transactions(
         merchant: Merchant name search (case-insensitive, partial match)
         limit: Max results (default 50)
     """
+
     def _query():
         auto_sync_if_stale()
         db = get_db()
         try:
             count = db.execute("SELECT COUNT(*) FROM monzo_transactions").fetchone()[0]
             if count == 0:
-                return format_response({
-                    "error": "No transaction data available. Check your Monzo auth with `monzo-mcp auth`."
-                })
+                return format_response(
+                    {
+                        "error": (
+                            "No transaction data available. Check your Monzo auth "
+                            "with `monzo-mcp auth`."
+                        )
+                    }
+                )
 
             conditions = []
             params = []
@@ -279,7 +309,9 @@ async def monzo_search_transactions(
     before: str | None = None,
     limit: int = 30,
 ) -> str:
-    """Search cached transactions by merchant name, description, or notes. Auto-syncs if the cache is stale (last sync before today).
+    """Search cached transactions by merchant name, description, or notes.
+
+    Auto-syncs if the cache is stale (last sync before today).
 
     Case-insensitive partial match across merchant_name, description, and notes fields.
 
@@ -290,19 +322,23 @@ async def monzo_search_transactions(
         before: End date in ISO format (exclusive)
         limit: Max results (default 30)
     """
+
     def _query_db():
         auto_sync_if_stale()
         db = get_db()
         try:
             count = db.execute("SELECT COUNT(*) FROM monzo_transactions").fetchone()[0]
             if count == 0:
-                return format_response({
-                    "error": "No transaction data available. Check your Monzo auth with `monzo-mcp auth`."
-                })
+                return format_response(
+                    {
+                        "error": (
+                            "No transaction data available. Check your Monzo auth "
+                            "with `monzo-mcp auth`."
+                        )
+                    }
+                )
 
-            conditions = [
-                "(merchant_name LIKE ? OR description LIKE ? OR notes LIKE ?)"
-            ]
+            conditions = ["(merchant_name LIKE ? OR description LIKE ? OR notes LIKE ?)"]
             params = [f"%{query}%", f"%{query}%", f"%{query}%"]
 
             if account_type:

@@ -4,10 +4,15 @@ import time
 
 import anyio
 
-from ..mcp_instance import mcp
-from ..helpers import format_response, require_auth, pence_to_pounds, validate_account_type
 from .. import api
 from ..db import get_db, save_balance
+from ..helpers import (
+    format_response,
+    pence_to_pounds,
+    require_auth,
+    validate_account_type,
+)
+from ..mcp_instance import mcp
 
 # Cache account list to avoid repeated /accounts API calls
 _accounts_cache = None
@@ -48,12 +53,14 @@ async def monzo_list_accounts() -> str:
     accounts = []
     for acct in data:
         atype = "joint" if acct.get("type") == "uk_retail_joint" else "personal"
-        accounts.append({
-            "id": acct["id"],
-            "type": atype,
-            "closed": acct.get("closed", False),
-            "created": acct.get("created"),
-        })
+        accounts.append(
+            {
+                "id": acct["id"],
+                "type": atype,
+                "closed": acct.get("closed", False),
+                "created": acct.get("created"),
+            }
+        )
     return format_response(accounts)
 
 
@@ -76,7 +83,13 @@ async def monzo_get_balance(account_type: str = "personal") -> str:
         bal = api.get(f"/balance?account_id={acct_id}")
         db = get_db()
         try:
-            save_balance(db, atype, f"Monzo {atype.title()}", bal["balance"], bal.get("currency", "GBP"))
+            save_balance(
+                db,
+                atype,
+                f"Monzo {atype.title()}",
+                bal["balance"],
+                bal.get("currency", "GBP"),
+            )
         finally:
             db.close()
         return {
@@ -86,6 +99,7 @@ async def monzo_get_balance(account_type: str = "personal") -> str:
             "spend_today": pence_to_pounds(bal.get("spend_today", 0)),
             "currency": bal.get("currency", "GBP"),
         }
+
     result = await anyio.to_thread.run_sync(_fetch)
     return format_response(result)
 
@@ -126,5 +140,6 @@ async def monzo_list_pots(account_type: str = "personal") -> str:
         finally:
             db.close()
         return pots
+
     result = await anyio.to_thread.run_sync(_fetch)
     return format_response(result)
