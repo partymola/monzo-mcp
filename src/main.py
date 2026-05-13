@@ -28,7 +28,7 @@ from monzo_mcp.tools import (
 
 
 def create_parser():
-    parser = argparse.ArgumentParser(prog="monzo-mcp", add_help=False)
+    parser = argparse.ArgumentParser(prog="monzo-mcp")
     parser.add_argument("--version", action="version", version=f"monzo-mcp {version('monzo-mcp')}")
     parser.add_argument("command", nargs="?")
     return parser

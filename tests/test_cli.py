@@ -2,6 +2,7 @@
 
 import sys
 import unittest
+from importlib.metadata import version
 from io import StringIO
 from unittest.mock import patch
 
@@ -18,7 +19,7 @@ class TestCliVersion(unittest.TestCase):
                 main.main()
 
         self.assertEqual(error.exception.code, 0)
-        self.assertEqual(stdout.getvalue().strip(), "monzo-mcp 0.1.0")
+        self.assertEqual(stdout.getvalue().strip(), f"monzo-mcp {version('monzo-mcp')}")
 
 
 if __name__ == "__main__":
