@@ -28,7 +28,20 @@ def _format_transaction(row) -> dict:
     }
 
 
-def run_sync(account_type: str | None = None) -> dict:
+def _coerce_since(value: str) -> str:
+    """Coerce an ISO date or datetime to RFC3339 (``YYYY-MM-DDTHH:MM:SSZ``).
+
+    Accepts a bare date (``2026-01-01``) or a full ISO datetime
+    (``2026-01-01T14:30:00Z`` or ``...+00:00``). Naive values are treated as UTC.
+    Raises ``ValueError`` if the value cannot be parsed.
+    """
+    dt = datetime.fromisoformat(value.strip())
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def run_sync(account_type: str | None = None, since: str | None = None) -> dict:
     """Sync transactions, balances, and pots from the Monzo API into the local cache.
 
     Fetches up to 11 months of history (within SCA window) or falls back to
@@ -37,7 +50,24 @@ def run_sync(account_type: str | None = None) -> dict:
 
     Args:
         account_type: "personal", "joint", or None to sync all accounts
+        since: Optional ISO date ("2026-01-01") or datetime ("2026-01-01T14:30:00Z")
+            to start the backfill from, overriding last-sync resumption. Reaching
+            beyond ~90 days only works inside the post-auth SCA window; outside it
+            the API's 90-day fallback still applies (the value is passed straight to
+            the Monzo API, not gated client-side).
     """
+    since_override = None
+    if since is not None:
+        try:
+            since_override = _coerce_since(since)
+        except ValueError:
+            return {
+                "error": (
+                    f"Invalid 'since' value: {since!r}. "
+                    "Use an ISO date (2026-01-01) or datetime (2026-01-01T14:30:00Z)."
+                )
+            }
+
     accounts_data = api.get("/accounts")
     accounts = accounts_data.get("accounts", [])
     if not accounts:
@@ -90,7 +120,7 @@ def run_sync(account_type: str | None = None) -> dict:
             except Exception as e:
                 detail["pots_error"] = str(e)
 
-            since = (datetime.now(timezone.utc) - timedelta(days=335)).strftime(
+            since = since_override or (datetime.now(timezone.utc) - timedelta(days=335)).strftime(
                 "%Y-%m-%dT00:00:00Z"
             )
             added = 0
@@ -213,7 +243,7 @@ def auto_sync_if_stale() -> None:
 
 @mcp.tool()
 @require_auth
-async def monzo_sync(account_type: str | None = None) -> str:
+async def monzo_sync(account_type: str | None = None, since: str | None = None) -> str:
     """Sync transactions, balances, and pots from the Monzo API into the local cache.
 
     Fetches up to 11 months of history (within SCA window) or falls back to
@@ -222,8 +252,11 @@ async def monzo_sync(account_type: str | None = None) -> str:
 
     Args:
         account_type: "personal", "joint", or None to sync all accounts
+        since: Optional ISO date ("2026-01-01") or datetime ("2026-01-01T14:30:00Z")
+            to start the backfill from, overriding last-sync resumption. Reaching
+            beyond ~90 days only works inside the post-auth SCA window.
     """
-    result = await anyio.to_thread.run_sync(lambda: run_sync(account_type))
+    result = await anyio.to_thread.run_sync(lambda: run_sync(account_type, since))
     return format_response(result)
 
 

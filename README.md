@@ -91,6 +91,8 @@ Monzo's Strong Customer Authentication (SCA) limits transaction history access:
 
 The local SQLite cache preserves all synced transactions permanently, so run `monzo_sync` promptly after `monzo-mcp auth`.
 
+To backfill a specific range, pass `since` to `monzo_sync` - an ISO date (`2026-01-01`) or datetime (`2026-01-01T14:30:00Z`). It overrides the usual last-sync resumption and is passed straight to the Monzo API. Reaching back more than ~90 days only works inside the SCA window; outside it, the 90-day fallback applies.
+
 ## Security
 
 - **Zero write tools** - cannot send money, move funds between pots, or modify transactions
