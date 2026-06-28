@@ -23,7 +23,10 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3.5",
-    "ruff>=0.6",
+    # Pinned exactly so local and CI lint are deterministic: ruff's formatter
+    # changes between releases, and an unpinned spec lets CI pull a newer ruff
+    # that reformats code an older local ruff had passed. Bump deliberately.
+    "ruff==0.15.20",
 ]
 
 [project.scripts]
