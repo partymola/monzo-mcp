@@ -14,6 +14,7 @@ Unlike other Monzo MCP implementations that use raw bearer tokens (which expire 
 - **7 read-only tools** - no write operations, no money movement
 - **OAuth with auto-refresh** - tokens refresh automatically, no manual regeneration
 - **Local transaction cache** - SQLite database survives Monzo's 90-day SCA window
+- **Auto-sync on demand** - the cache-reading tools run an incremental sync automatically if the cache wasn't synced today, so you rarely need to call `monzo_sync` by hand
 - **Spending analysis** - category breakdowns, top merchants, month-over-month comparison
 - **Transaction search** - search by merchant, description, or notes across cached history
 
@@ -25,9 +26,9 @@ Unlike other Monzo MCP implementations that use raw bearer tokens (which expire 
 | `monzo_get_balance` | Current balance and spend today | Live API |
 | `monzo_list_pots` | Savings pots and balances | Live API |
 | `monzo_sync` | Sync transactions to local cache | Live API -> SQLite |
-| `monzo_list_transactions` | List/filter cached transactions | Local cache |
-| `monzo_search_transactions` | Search by merchant/description/notes | Local cache |
-| `monzo_spending` | Spending analysis with category breakdown | Local cache |
+| `monzo_list_transactions` | List/filter cached transactions | Local cache (auto-syncs if stale) |
+| `monzo_search_transactions` | Search by merchant/description/notes | Local cache (auto-syncs if stale) |
+| `monzo_spending` | Spending analysis with category breakdown | Local cache (auto-syncs if stale) |
 
 ## Prerequisites
 
@@ -70,6 +71,14 @@ claude mcp add -s user monzo -- /path/to/monzo-mcp/.venv/bin/monzo-mcp
 
 In Claude Code, run `monzo_sync` to populate the local transaction cache. Do this immediately after auth to take advantage of the SCA window (up to 11 months of history).
 
+## CLI
+
+```
+monzo-mcp              Start the MCP server (stdio transport)
+monzo-mcp auth         Interactive OAuth setup (opens the browser)
+monzo-mcp --version    Print the installed package version
+```
+
 ## Configuration
 
 All configuration is via environment variables (optional):
@@ -99,6 +108,12 @@ To backfill a specific range, pass `since` to `monzo_sync` - an ISO date (`2026-
 - **Monzo API itself** cannot send money to external accounts
 - Tokens stored as JSON files in the `config/` directory (gitignored)
 - All API calls are GET requests with Bearer token auth
+
+## Troubleshooting
+
+- **"SCA required" or only 90 days of history** - re-run `monzo-mcp auth` and approve the login in the Monzo app within 5 minutes, then sync straight away (see the SCA window above).
+- **Token expired / no refresh** - re-run `monzo-mcp auth` to re-authorise.
+- **"No transaction data available"** - the cache is empty; call `monzo_sync` (or any cache-reading tool, which auto-syncs) once after authenticating.
 
 ## Contributing
 
