@@ -1,0 +1,44 @@
+name: Publish to MCP Registry
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/partymola/monzo-mcp:${{ github.ref_name }}
+            ghcr.io/partymola/monzo-mcp:latest
+      - name: Sync server.json to the release tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          jq --arg v "$VERSION" --arg id "ghcr.io/partymola/monzo-mcp:${GITHUB_REF_NAME}" \
+            '.version=$v | .packages[0].version=$v | .packages[0].identifier=$id' server.json > server.tmp && mv server.tmp server.json
+      - name: Publish to the MCP registry
+        run: |
+          curl -sL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+          ./mcp-publisher login github-oidc
+          # The GHCR package must be public for the registry to verify the ownership label.
+          for i in 1 2 3; do
+            if ./mcp-publisher publish; then exit 0; fi
+            echo "mcp-publisher publish attempt $i failed; retrying in 15s"; sleep 15
+          done
+          echo "::error::mcp-publisher publish failed - is the GHCR package public?"; exit 1

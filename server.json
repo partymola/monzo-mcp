@@ -1,0 +1,19 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.partymola/monzo-mcp",
+  "description": "Read-only MCP server for the Monzo banking API: OAuth, local transaction cache, spending analysis.",
+  "repository": {
+    "url": "https://github.com/partymola/monzo-mcp",
+    "source": "github"
+  },
+  "version": "0.2.1",
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/partymola/monzo-mcp:v0.2.1",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
