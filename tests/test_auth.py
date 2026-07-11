@@ -1,0 +1,413 @@
+"""Tests for OAuth token management and interactive setup.
+
+No network and no real OAuth: the HTTP layer (`urllib.request.urlopen`), the
+local callback HTTPServer, `input`, `webbrowser`, and the JSON file I/O are all
+mocked. Time is pinned via a datetime subclass so the 5-minute expiry buffer and
+the stored expiry timestamps are exact, not approximate.
+"""
+
+import io
+import json
+import sys
+import tempfile
+import unittest
+import urllib.error
+from datetime import datetime
+from io import StringIO
+from pathlib import Path
+from unittest.mock import patch
+
+from monzo_mcp import auth
+
+# Fixed "now" so expiry maths is deterministic.
+NOW_TS = 1_700_000_000
+CREDS = {"client_id": "cid_test", "client_secret": "csecret_test"}
+
+
+class _FixedDatetime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return datetime.fromtimestamp(NOW_TS, tz)
+
+
+class _FakeResp:
+    def __init__(self, payload):
+        self._body = json.dumps(payload).encode()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return self._body
+
+
+# --------------------------------------------------------------------------- #
+# refresh_token
+# --------------------------------------------------------------------------- #
+class TestRefreshToken(unittest.TestCase):
+    def tearDown(self):
+        # Belt-and-braces: the module-level token/cred caches are always mutated
+        # inside patch.object here, but reset them so no state can leak to a
+        # future test that forgets to patch (which could read the real files).
+        auth._cached_tokens = None
+        auth._cached_creds = None
+
+    def _refresh(self, tokens, *, urlopen=None, creds=CREDS, save_capture=None):
+        """Run refresh_token with the module cache preloaded (no file reads)."""
+        saves = save_capture if save_capture is not None else {}
+        stack = [
+            patch.object(auth, "_cached_tokens", dict(tokens)),
+            patch.object(auth, "_cached_creds", dict(creds)),
+            patch.object(auth, "datetime", _FixedDatetime),
+            patch.object(auth, "_save_json", lambda path, data: saves.update(data)),
+        ]
+        if urlopen is not None:
+            stack.append(patch("urllib.request.urlopen", urlopen))
+        with self._nest(stack):
+            return auth.refresh_token()
+
+    class _nest:
+        def __init__(self, cms):
+            self._cms = cms
+
+        def __enter__(self):
+            for cm in self._cms:
+                cm.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            for cm in reversed(self._cms):
+                cm.__exit__(*exc)
+            return False
+
+    def test_valid_token_returned_without_refresh(self):
+        # Expiry 301s ahead -> just outside the 300s buffer -> no refresh.
+        called = {"n": 0}
+
+        def urlopen(req, timeout=None):
+            called["n"] += 1
+            return _FakeResp({})
+
+        tok = self._refresh(
+            {"access_token": "live", "refresh_token": "r1", "expiry": NOW_TS + 301},
+            urlopen=urlopen,
+        )
+        self.assertEqual(tok, "live")
+        self.assertEqual(called["n"], 0)
+
+    def test_token_at_buffer_boundary_is_refreshed(self):
+        # Source guard is `now < expiry - 300`. At expiry = now + 300 the guard
+        # is `now < now` -> False -> refresh. Pinning exactly 300 (not 299) makes
+        # an off-by-one such as `- 300` -> `- 299` fail this test.
+        captured = {}
+
+        def urlopen(req, timeout=None):
+            captured["req"] = req
+            return _FakeResp({"access_token": "fresh", "refresh_token": "r2", "expires_in": 3600})
+
+        saves = {}
+        tok = self._refresh(
+            {"access_token": "stale", "refresh_token": "r1", "expiry": NOW_TS + 300},
+            urlopen=urlopen,
+            save_capture=saves,
+        )
+        self.assertEqual(tok, "fresh")
+        # The refresh POST carries the refresh_token grant with the stored creds.
+        body = captured["req"].data
+        self.assertIn(b"grant_type=refresh_token", body)
+        self.assertIn(b"refresh_token=r1", body)
+        self.assertIn(b"client_id=cid_test", body)
+        # New expiry = fixed now + expires_in; rotated refresh token persisted.
+        self.assertEqual(saves["expiry"], NOW_TS + 3600)
+        self.assertEqual(saves["access_token"], "fresh")
+        self.assertEqual(saves["refresh_token"], "r2")
+        self.assertEqual(saves["token_type"], "Bearer")
+
+    def test_refresh_keeps_old_refresh_token_when_response_omits_it(self):
+        def urlopen(req, timeout=None):
+            return _FakeResp({"access_token": "fresh", "expires_in": 3600})
+
+        saves = {}
+        self._refresh(
+            {"access_token": "stale", "refresh_token": "keep_me", "expiry": 0},
+            urlopen=urlopen,
+            save_capture=saves,
+        )
+        self.assertEqual(saves["refresh_token"], "keep_me")
+
+    def test_refresh_defaults_expires_in_to_one_day(self):
+        def urlopen(req, timeout=None):
+            return _FakeResp({"access_token": "fresh", "refresh_token": "r2"})
+
+        saves = {}
+        self._refresh(
+            {"access_token": "stale", "refresh_token": "r1", "expiry": 0},
+            urlopen=urlopen,
+            save_capture=saves,
+        )
+        self.assertEqual(saves["expiry"], NOW_TS + 86400)
+
+    def test_expired_without_refresh_token_raises(self):
+        called = {"n": 0}
+
+        def urlopen(req, timeout=None):
+            called["n"] += 1
+            return _FakeResp({})
+
+        with self.assertRaises(RuntimeError) as ctx:
+            self._refresh(
+                {"access_token": "stale", "refresh_token": "", "expiry": 0},
+                urlopen=urlopen,
+            )
+        self.assertIn("refresh token", str(ctx.exception).lower())
+        self.assertEqual(called["n"], 0)  # never hit the network
+
+    def test_refresh_network_error_raises_runtime_error(self):
+        def urlopen(req, timeout=None):
+            raise urllib.error.URLError("connection refused")
+
+        with self.assertRaises(RuntimeError) as ctx:
+            self._refresh(
+                {"access_token": "stale", "refresh_token": "r1", "expiry": 0},
+                urlopen=urlopen,
+            )
+        self.assertIn("monzo-mcp auth", str(ctx.exception))
+
+    def test_tokens_and_creds_lazy_loaded_from_disk_when_cache_empty(self):
+        loaded = []
+
+        def fake_load(path):
+            loaded.append(path)
+            if path is auth.MONZO_TOKENS_PATH:
+                return {"access_token": "disk_tok", "refresh_token": "r1", "expiry": NOW_TS + 999}
+            return dict(CREDS)
+
+        with (
+            patch.object(auth, "_cached_tokens", None),
+            patch.object(auth, "_cached_creds", None),
+            patch.object(auth, "datetime", _FixedDatetime),
+            patch.object(auth, "_load_json", fake_load),
+        ):
+            tok = auth.refresh_token()
+
+        self.assertEqual(tok, "disk_tok")
+        # Both credential files were read exactly once to populate the cache.
+        self.assertIn(auth.MONZO_TOKENS_PATH, loaded)
+        self.assertIn(auth.MONZO_CLIENT_PATH, loaded)
+
+
+class TestJsonHelpers(unittest.TestCase):
+    def test_save_then_load_roundtrips(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # Nested path exercises the parent-mkdir in _save_json.
+            path = Path(tmp) / "sub" / "tokens.json"
+            data = {"access_token": "at", "expiry": 123}
+            auth._save_json(path, data)
+            self.assertTrue(path.exists())
+            self.assertEqual(auth._load_json(path), data)
+
+
+# --------------------------------------------------------------------------- #
+# setup_auth
+# --------------------------------------------------------------------------- #
+class _FakeConfigDir:
+    def mkdir(self, *a, **k):
+        pass
+
+
+def _server_factory(callback_path, recorded):
+    """Return an HTTPServer stand-in that drives the callback handler once."""
+
+    class _FakeServer:
+        def __init__(self, addr, handler_cls):
+            self._handler_cls = handler_cls
+
+        def handle_request(self):
+            h = self._handler_cls.__new__(self._handler_cls)
+            h.path = callback_path
+            h.wfile = io.BytesIO()
+            h.send_response = lambda code, *a, **k: recorded.append(code)
+            h.send_header = lambda *a, **k: None
+            h.end_headers = lambda *a, **k: None
+            h.do_GET()
+
+        def server_close(self):
+            pass
+
+    return _FakeServer
+
+
+class _SetupResult:
+    def __init__(self, saved, recorded, token_req, stdout, exit_code):
+        self.saved = saved  # {path: data}
+        self.recorded = recorded  # HTTP response codes the handler emitted
+        self.token_req = token_req  # the code-exchange Request, or None
+        self.stdout = stdout
+        self.exit_code = exit_code  # None on success, else the sys.exit code
+
+
+def _run_setup(
+    *,
+    client_exists,
+    inputs,
+    callback_path,
+    token_response=None,
+    token_raises=None,
+    existing_creds=None,
+):
+    saved = {}
+    recorded = []
+    box = {"token_req": None}
+
+    class _Path:
+        def __init__(self, exists):
+            self._exists = exists
+
+        def exists(self):
+            return self._exists
+
+    client_path = _Path(client_exists)
+    tokens_path = _Path(False)
+
+    def fake_save(path, data):
+        saved[path] = data
+
+    def fake_load(path):
+        return dict(existing_creds) if existing_creds else {}
+
+    def fake_urlopen(req, timeout=None):
+        box["token_req"] = req
+        if token_raises is not None:
+            raise token_raises
+        return _FakeResp(token_response)
+
+    out = StringIO()
+    with (
+        patch.object(auth, "CONFIG_DIR", _FakeConfigDir()),
+        patch.object(auth, "MONZO_CLIENT_PATH", client_path),
+        patch.object(auth, "MONZO_TOKENS_PATH", tokens_path),
+        patch.object(auth, "datetime", _FixedDatetime),
+        patch.object(auth, "_save_json", fake_save),
+        patch.object(auth, "_load_json", fake_load),
+        patch.object(auth, "webbrowser"),
+        patch.object(auth, "HTTPServer", _server_factory(callback_path, recorded)),
+        patch("urllib.request.urlopen", fake_urlopen),
+        patch("builtins.input", side_effect=inputs),
+        patch.object(sys, "stdout", out),
+    ):
+        exit_code = None
+        try:
+            auth.setup_auth()
+        except SystemExit as e:
+            exit_code = e.code
+
+    result = _SetupResult(saved, recorded, box["token_req"], out.getvalue(), exit_code)
+    return result, client_path, tokens_path
+
+
+class TestSetupAuth(unittest.TestCase):
+    def test_full_new_credential_flow(self):
+        result, client_path, tokens_path = _run_setup(
+            client_exists=False,
+            inputs=["new_client", "new_secret"],
+            callback_path="/callback?code=auth_code_xyz&state=s",
+            token_response={
+                "access_token": "at_1",
+                "refresh_token": "rt_1",
+                "expires_in": 21600,
+            },
+        )
+        # Entered credentials were saved to the client file.
+        self.assertEqual(
+            result.saved[client_path],
+            {"client_id": "new_client", "client_secret": "new_secret"},
+        )
+        # The code-exchange POST used the authorization_code grant with the code
+        # captured from the callback and the local redirect URI.
+        body = result.token_req.data
+        self.assertEqual(result.token_req.full_url, auth.MONZO_TOKEN_URL)
+        self.assertIn(b"grant_type=authorization_code", body)
+        self.assertIn(b"code=auth_code_xyz", body)
+        self.assertIn(b"redirect_uri=http", body)
+        # The callback handler acknowledged the browser with a 200.
+        self.assertEqual(result.recorded, [200])
+        # Tokens were stored with a computed expiry (fixed now + expires_in).
+        stored = result.saved[tokens_path]
+        self.assertEqual(stored["access_token"], "at_1")
+        self.assertEqual(stored["refresh_token"], "rt_1")
+        self.assertEqual(stored["token_type"], "Bearer")
+        self.assertEqual(stored["expiry"], NOW_TS + 21600)
+        # SCA window is surfaced to the user.
+        self.assertIn("5 minutes", result.stdout)
+
+    def test_reuse_existing_credentials(self):
+        result, client_path, tokens_path = _run_setup(
+            client_exists=True,
+            inputs=[""],  # accept "Re-use existing credentials? [Y/n]" default
+            callback_path="/callback?code=code_reuse&state=s",
+            token_response={"access_token": "at_2", "refresh_token": "rt_2", "expires_in": 3600},
+            existing_creds=CREDS,
+        )
+        # Reused creds are NOT re-saved; only the token file is written.
+        self.assertNotIn(client_path, result.saved)
+        self.assertIn(tokens_path, result.saved)
+        # The exchange used the existing client_id.
+        self.assertIn(b"client_id=cid_test", result.token_req.data)
+
+    def test_declining_reuse_prompts_for_new_credentials(self):
+        # "n" at the reuse prompt discards the existing creds and re-prompts,
+        # then saves the freshly entered client credentials.
+        result, client_path, _tokens_path = _run_setup(
+            client_exists=True,
+            inputs=["n", "fresh_client", "fresh_secret"],
+            callback_path="/callback?code=code_new&state=s",
+            token_response={"access_token": "at_3", "refresh_token": "rt_3", "expires_in": 3600},
+            existing_creds=CREDS,
+        )
+        self.assertEqual(
+            result.saved[client_path],
+            {"client_id": "fresh_client", "client_secret": "fresh_secret"},
+        )
+        self.assertIn(b"client_id=fresh_client", result.token_req.data)
+
+    def test_missing_code_exits_and_handler_emits_400(self):
+        # Callback without a code -> handler returns 400, no auth code -> exit 1,
+        # and no tokens are written.
+        result, _client_path, tokens_path = _run_setup(
+            client_exists=True,
+            inputs=[""],
+            callback_path="/callback?error=access_denied",
+            existing_creds=CREDS,
+        )
+        self.assertEqual(result.exit_code, 1)
+        self.assertEqual(result.recorded, [400])
+        self.assertNotIn(tokens_path, result.saved)
+
+    def test_empty_client_id_exits_before_starting_server(self):
+        result, _client_path, _tokens_path = _run_setup(
+            client_exists=False,
+            inputs=["", "some_secret"],  # empty client_id
+            callback_path="/callback?code=x",
+        )
+        self.assertEqual(result.exit_code, 1)
+        # Bailed before the OAuth server ran, so no callback was handled.
+        self.assertEqual(result.recorded, [])
+        self.assertIsNone(result.token_req)
+
+    def test_code_exchange_network_error_exits(self):
+        result, _client_path, tokens_path = _run_setup(
+            client_exists=True,
+            inputs=[""],
+            callback_path="/callback?code=good_code",
+            token_raises=urllib.error.URLError("boom"),
+            existing_creds=CREDS,
+        )
+        self.assertEqual(result.exit_code, 1)
+        self.assertNotIn(tokens_path, result.saved)  # nothing persisted on failure
+
+
+if __name__ == "__main__":
+    unittest.main()
