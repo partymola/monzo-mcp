@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-18
+
+### Added
+
+- Counterparty support for bank transfers (faster payments, p2p, Bacs): sync now persists the payee's name, sort code, account number, and user id from the `counterparty` object the transactions endpoint already returns. `monzo_list_transactions` and `monzo_search_transactions` include a `counterparty` object for transactions that have one, and search also matches the counterparty name - so transfers can be found by payee. Existing databases are migrated automatically (new nullable columns); previously cached rows gain counterparty data when re-fetched by a later sync.
+
 ## [0.2.1] - 2026-07-11
 
 ### Packaging
@@ -34,7 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Transaction search across merchant name, description, and notes.
 - Pre-commit hook (`scripts/check-no-data.sh`) blocking commit of databases, tokens, and other secrets.
 
-[Unreleased]: https://github.com/partymola/monzo-mcp/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/partymola/monzo-mcp/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/partymola/monzo-mcp/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/partymola/monzo-mcp/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/partymola/monzo-mcp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/partymola/monzo-mcp/releases/tag/v0.1.0
