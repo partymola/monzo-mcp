@@ -234,6 +234,59 @@ class TestAuthHoldDedup(unittest.TestCase):
         holder.close()
 
 
+class TestCounterpartySync(unittest.TestCase):
+    def test_counterparty_persisted_for_transfers_and_null_for_cards(self):
+        transfer = _mk("tx_fp", amount=-39900, created="2026-02-01T10:00:00Z", settled="2026-02-01")
+        transfer["merchant"] = None
+        transfer["description"] = "Acme Solar LLP"
+        transfer["counterparty"] = {
+            "name": "Acme Solar LLP",
+            "sort_code": "123456",
+            "account_number": "12345678",
+            "user_id": "anonuser_ext1",
+        }
+        p2p = _mk("tx_p2p", amount=-2500, created="2026-02-01T11:00:00Z", settled="2026-02-01")
+        p2p["merchant"] = None
+        p2p["counterparty"] = {"name": "Jane Doe", "user_id": "user_friend1"}
+        card = _mk("tx_card", amount=-500, created="2026-02-02T10:00:00Z", settled="2026-02-02")
+
+        def txns_for(acct, since, n):
+            if since is None or not since.startswith("tx_"):
+                return [transfer, p2p, card]
+            return []
+
+        uri = "file:counterparty_sync_test?mode=memory&cache=shared"
+        holder = sqlite3.connect(uri, uri=True)
+        holder.row_factory = sqlite3.Row
+        holder.executescript(SCHEMA)
+
+        def get_db():
+            c = sqlite3.connect(uri, uri=True)
+            c.row_factory = sqlite3.Row
+            return c
+
+        fake = _FakeApi([{"id": "acc_1", "type": "uk_retail"}], txns_for)
+        with (
+            patch.object(transaction_tools.api, "get", fake.get),
+            patch.object(transaction_tools, "get_db", get_db),
+        ):
+            result = transaction_tools.run_sync()
+
+        self.assertEqual(result["transactions_upserted"], 3)
+        rows = {r["id"]: r for r in holder.execute("SELECT * FROM monzo_transactions").fetchall()}
+        self.assertEqual(rows["tx_fp"]["counterparty_name"], "Acme Solar LLP")
+        self.assertEqual(rows["tx_fp"]["counterparty_sort_code"], "123456")
+        self.assertEqual(rows["tx_fp"]["counterparty_account_number"], "12345678")
+        self.assertEqual(rows["tx_fp"]["counterparty_user_id"], "anonuser_ext1")
+        # p2p payments carry only name + user_id
+        self.assertEqual(rows["tx_p2p"]["counterparty_name"], "Jane Doe")
+        self.assertIsNone(rows["tx_p2p"]["counterparty_sort_code"])
+        # Card transactions have no counterparty at all
+        self.assertIsNone(rows["tx_card"]["counterparty_name"])
+        self.assertIsNone(rows["tx_card"]["counterparty_user_id"])
+        holder.close()
+
+
 class TestScaFallback(unittest.TestCase):
     def test_sca_on_first_fetch_falls_back_to_90_days(self):
         # First /transactions raises SCA; on page 0 run_sync retries with a

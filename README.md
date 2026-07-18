@@ -16,7 +16,8 @@ Unlike other Monzo MCP implementations that use raw bearer tokens (which expire 
 - **Local transaction cache** - SQLite database survives Monzo's 90-day SCA window
 - **Auto-sync on demand** - the cache-reading tools run an incremental sync automatically if the cache wasn't synced today, so you rarely need to call `monzo_sync` by hand
 - **Spending analysis** - category breakdowns, top merchants, month-over-month comparison
-- **Transaction search** - search by merchant, description, or notes across cached history
+- **Transaction search** - search by merchant, payee (counterparty), description, or notes across cached history
+- **Counterparty details** - bank transfers (faster payments, p2p, Bacs) are cached with the payee's name, sort code, and account number
 
 ## Tools
 
@@ -27,7 +28,7 @@ Unlike other Monzo MCP implementations that use raw bearer tokens (which expire 
 | `monzo_list_pots` | Savings pots and balances | Live API |
 | `monzo_sync` | Sync transactions to local cache | Live API -> SQLite |
 | `monzo_list_transactions` | List/filter cached transactions | Local cache (auto-syncs if stale) |
-| `monzo_search_transactions` | Search by merchant/description/notes | Local cache (auto-syncs if stale) |
+| `monzo_search_transactions` | Search by merchant/payee/description/notes | Local cache (auto-syncs if stale) |
 | `monzo_spending` | Spending analysis with category breakdown | Local cache (auto-syncs if stale) |
 
 ## Prerequisites
@@ -101,6 +102,8 @@ Monzo's Strong Customer Authentication (SCA) limits transaction history access:
 The local SQLite cache preserves all synced transactions permanently, so run `monzo_sync` promptly after `monzo-mcp auth`.
 
 To backfill a specific range, pass `since` to `monzo_sync` - an ISO date (`2026-01-01`) or datetime (`2026-01-01T14:30:00Z`). It overrides the usual last-sync resumption and is passed straight to the Monzo API. Reaching back more than ~90 days only works inside the SCA window; outside it, the 90-day fallback applies.
+
+Transactions cached by a version of this server that predates a schema addition (e.g. counterparty details on bank transfers) gain the new fields only when re-fetched from the API. The next post-auth full sync - typically the periodic `monzo-mcp auth` re-authentication followed by a sync inside the SCA window - backfills them for the history it re-pulls.
 
 ## Security
 

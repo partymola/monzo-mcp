@@ -13,7 +13,7 @@ from ..mcp_instance import mcp
 
 def _format_transaction(row) -> dict:
     """Format a DB row as a transaction dict with amounts in pounds."""
-    return {
+    result = {
         "id": row["id"],
         "account_type": row["account_type"],
         "date": row["created"][:10],
@@ -26,6 +26,13 @@ def _format_transaction(row) -> dict:
         "notes": row["notes"] or None,
         "settled": row["settled"] or None,
     }
+    if row["counterparty_name"]:
+        result["counterparty"] = {
+            key: row[f"counterparty_{key}"]
+            for key in ("name", "sort_code", "account_number")
+            if row[f"counterparty_{key}"]
+        }
+    return result
 
 
 def _coerce_since(value: str) -> str:
@@ -160,11 +167,19 @@ def run_sync(account_type: str | None = None, since: str | None = None) -> dict:
                     if isinstance(tx.get("merchant"), dict):
                         merchant_name = tx["merchant"].get("name")
 
+                    # Bank transfers (faster payments, p2p, bacs) carry the payee
+                    # in a counterparty object instead of a merchant
+                    counterparty = tx.get("counterparty")
+                    if not isinstance(counterparty, dict):
+                        counterparty = {}
+
                     db.execute(
                         """INSERT OR REPLACE INTO monzo_transactions
                            (id, account_id, account_type, created, amount, currency,
-                            description, merchant_name, category, notes, settled)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            description, merchant_name, category, notes, settled,
+                            counterparty_name, counterparty_sort_code,
+                            counterparty_account_number, counterparty_user_id)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (
                             tx["id"],
                             acct_id,
@@ -177,6 +192,10 @@ def run_sync(account_type: str | None = None, since: str | None = None) -> dict:
                             tx.get("category", ""),
                             tx.get("notes", ""),
                             tx.get("settled", ""),
+                            counterparty.get("name"),
+                            counterparty.get("sort_code"),
+                            counterparty.get("account_number"),
+                            counterparty.get("user_id"),
                         ),
                     )
                     added += 1
@@ -274,7 +293,9 @@ async def monzo_list_transactions(
 
     Auto-syncs if the cache is stale (last sync before today).
 
-    Queries the synced transaction database, not the live API.
+    Queries the synced transaction database, not the live API. Bank transfers
+    (faster payments, p2p, bacs) include a `counterparty` object with the payee
+    name and, where the scheme provides them, sort code and account number.
 
     Args:
         account_type: "personal" or "joint" (default: all)
@@ -342,11 +363,13 @@ async def monzo_search_transactions(
     before: str | None = None,
     limit: int = 30,
 ) -> str:
-    """Search cached transactions by merchant name, description, or notes.
+    """Search cached transactions by merchant, counterparty (payee), description, or notes.
 
     Auto-syncs if the cache is stale (last sync before today).
 
-    Case-insensitive partial match across merchant_name, description, and notes fields.
+    Case-insensitive partial match across merchant_name, counterparty_name,
+    description, and notes fields. Counterparty matching finds bank transfers
+    (faster payments, p2p, bacs) by payee name.
 
     Args:
         query: Search term
@@ -371,8 +394,11 @@ async def monzo_search_transactions(
                     }
                 )
 
-            conditions = ["(merchant_name LIKE ? OR description LIKE ? OR notes LIKE ?)"]
-            params = [f"%{query}%", f"%{query}%", f"%{query}%"]
+            conditions = [
+                "(merchant_name LIKE ? OR counterparty_name LIKE ? "
+                "OR description LIKE ? OR notes LIKE ?)"
+            ]
+            params = [f"%{query}%"] * 4
 
             if account_type:
                 conditions.append("account_type = ?")

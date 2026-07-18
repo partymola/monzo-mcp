@@ -17,7 +17,11 @@ CREATE TABLE IF NOT EXISTS monzo_transactions (
     merchant_name TEXT,
     category TEXT,
     notes TEXT,
-    settled TEXT
+    settled TEXT,
+    counterparty_name TEXT,
+    counterparty_sort_code TEXT,
+    counterparty_account_number TEXT,
+    counterparty_user_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_txn_created ON monzo_transactions(created);
@@ -44,6 +48,28 @@ CREATE TABLE IF NOT EXISTS sync_log (
 
 _schema_initialized = False
 
+# Columns added after the original schema; CREATE TABLE IF NOT EXISTS does not
+# extend existing tables, so these are applied via ALTER TABLE on first open.
+_TXN_ADDED_COLUMNS = (
+    "counterparty_name",
+    "counterparty_sort_code",
+    "counterparty_account_number",
+    "counterparty_user_id",
+)
+
+
+def migrate(db: sqlite3.Connection) -> None:
+    """Add any missing columns to a database created with an older schema."""
+    existing = {row[1] for row in db.execute("PRAGMA table_info(monzo_transactions)").fetchall()}
+    missing = [col for col in _TXN_ADDED_COLUMNS if col not in existing]
+    for col in missing:
+        try:
+            db.execute(f"ALTER TABLE monzo_transactions ADD COLUMN {col} TEXT")
+        except sqlite3.OperationalError:
+            pass  # another process added the column concurrently
+    if missing:
+        db.commit()
+
 
 def get_db() -> sqlite3.Connection:
     """Open monzo.db, ensure schema exists on first call, return connection."""
@@ -52,6 +78,7 @@ def get_db() -> sqlite3.Connection:
     db.row_factory = sqlite3.Row
     if not _schema_initialized:
         db.executescript(SCHEMA)
+        migrate(db)
         _schema_initialized = True
     return db
 
