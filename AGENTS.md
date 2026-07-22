@@ -28,6 +28,7 @@ The `scripts/check-no-data.sh` pre-commit hook enforces most of this - install i
 - **API**: `api.py` - GET-only wrapper with auto-refresh and typed exceptions (read-only by design; no write path exists)
 - **DB**: `db.py` - SQLite schema, `get_db()`, `migrate()` (ALTER TABLE for columns added after a DB was created), balance/sync helpers
 - **Tools**: `tools/account_tools.py`, `tools/transaction_tools.py`, `tools/analysis_tools.py`
+- **Helpers**: `helpers.py` - `require_auth` (auth-gate decorator wrapping every tool), `format_response`, `pence_to_pounds`, `validate_account_type`
 - **Config**: env vars `MONZO_MCP_CONFIG_DIR`, `MONZO_MCP_DB_PATH`, falling back to package-relative paths
 
 ## Database schema
