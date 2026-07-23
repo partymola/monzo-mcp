@@ -29,6 +29,10 @@ _tmpfile=$(mktemp)
 trap 'rm -f "$_tmpfile"' EXIT
 git diff --cached --name-only --diff-filter=ACM > "$_tmpfile"
 while IFS= read -r file; do
+    # A dependency lockfile is legitimately large and only grows.
+    case "$file" in
+        uv.lock) continue ;;
+    esac
     size=$(git cat-file -s ":$file" 2>/dev/null || echo 0)
     if [ "$size" -gt 102400 ]; then
         echo "ERROR: Staged file '$file' is $(( size / 1024 ))KB (>100KB) - possible data leak"
