@@ -4,7 +4,7 @@
 #
 # POSIX sh compatible - no bash required.
 #
-# Install: cp scripts/check-no-data.sh .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+# Install: ln -sf ../../scripts/check-no-data.sh .git/hooks/pre-commit
 
 set -eu
 
