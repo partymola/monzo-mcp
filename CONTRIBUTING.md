@@ -53,6 +53,23 @@ Tests are fully offline - no real API calls, no real tokens. Fixtures use fictio
 - Run `ruff check src tests` and `ruff format --check src tests` before opening a PR.
 - Run `pytest tests/ -v` before opening a PR.
 
+## Releases (maintainers)
+
+1. Bump `version` in `pyproject.toml` and turn the `[Unreleased]` CHANGELOG heading into `## [X.Y.Z] - YYYY-MM-DD`, adding the compare link at the foot of the file.
+2. Push to `main` and wait for CI to pass on that commit.
+3. Tag it `vX.Y.Z` and push the tag by name.
+4. Create the GitHub Release.
+
+Step 4 is what publishes: `publish-registry.yml` runs on `release: published`, not on the tag push, so the tag on its own ships nothing. It builds the `Dockerfile`, pushes `ghcr.io/partymola/monzo-mcp:vX.Y.Z` and `:latest`, and publishes to the MCP registry. Because the Release event is what builds the image, do not create it until CI is green on the tagged commit.
+
+**Do not hand-edit `server.json`'s `version` or `packages[0].identifier`.** The workflow rewrites both from the tag before publishing, so the values committed to the repo are deliberately left behind and are not a bug. To see what actually published, query the registry rather than reading the file:
+
+```bash
+curl -s "https://registry.modelcontextprotocol.io/v0/servers?search=io.github.partymola/monzo-mcp"
+```
+
+`--version` reads the installed package metadata, so it follows `pyproject.toml`.
+
 ## Pull requests
 
 - Branch off `main`.
