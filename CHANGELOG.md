@@ -7,9 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-02
+
 ### Changed
 
 - **Breaking:** every account-scoped tool now names the account in its response, under one key. `monzo_list_pots`, `monzo_list_transactions` and `monzo_search_transactions` return `{"account_type": ..., "pots"/"transactions": [...]}` instead of a bare array; `monzo_spending` gains `account_type` on all four result shapes; and `monzo_sync`'s per-account details rename `account` to `account_type`. An empty array previously carried no trace of which account produced it, so "nothing there" and "wrong account" were indistinguishable - and the sync response was the one place calling this field `account` while every tool argument is `account_type`, which makes passing the wrong argument name easy. Where no account filter is given the value is `null`, keeping "all accounts" distinct from a missing key.
+
+### Fixed
+
+- `mcp` is now capped below 2.0. The dependency was declared `>=1.6.0` with no upper bound, so once `mcp` 2.0.0 was published a clean install pulled it in and the server failed to import - 2.0.0 no longer ships `mcp.server.fastmcp`, which this server is built on.
 
 ## [0.3.0] - 2026-07-18
 
@@ -44,7 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Transaction search across merchant name, description, and notes.
 - Pre-commit hook (`scripts/check-no-data.sh`) blocking commit of databases, tokens, and other secrets.
 
-[Unreleased]: https://github.com/partymola/monzo-mcp/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/partymola/monzo-mcp/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/partymola/monzo-mcp/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/partymola/monzo-mcp/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/partymola/monzo-mcp/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/partymola/monzo-mcp/compare/v0.1.0...v0.2.0
