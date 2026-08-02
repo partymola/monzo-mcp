@@ -112,7 +112,8 @@ async def monzo_list_pots(account_type: str = "personal") -> str:
     Args:
         account_type: "personal" or "joint" (default: "personal")
 
-    Returns pot names and balances. Also records balance snapshots.
+    Returns the account the pots belong to, plus pot names and balances.
+    Also records balance snapshots.
     """
     err = validate_account_type(account_type)
     if err:
@@ -139,7 +140,9 @@ async def monzo_list_pots(account_type: str = "personal") -> str:
                 pots.append(entry)
         finally:
             db.close()
-        return pots
+        # Naming the resolved account keeps an empty list from reading as
+        # "no pots" when the caller meant a different account
+        return {"account_type": atype, "pots": pots}
 
     result = await anyio.to_thread.run_sync(_fetch)
     return format_response(result)

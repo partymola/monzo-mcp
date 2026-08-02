@@ -22,6 +22,9 @@ async def monzo_spending(
 
     Auto-syncs if the cache is stale (last sync before today).
 
+    Every result carries `account_type`, echoing the filter applied and null
+    when unfiltered, so a zero total says which account it measured.
+
     Args:
         month: Month in YYYY-MM format (default: current month)
         category: Filter by category, e.g. "groceries", "eating_out", "transport"
@@ -67,7 +70,14 @@ async def monzo_spending(
                 ).fetchall()
 
                 if not rows:
-                    return format_response({"month": target_month, "transactions": [], "total": 0})
+                    return format_response(
+                        {
+                            "month": target_month,
+                            "account_type": account_type,
+                            "transactions": [],
+                            "total": 0,
+                        }
+                    )
 
                 transactions = []
                 total = 0
@@ -88,6 +98,7 @@ async def monzo_spending(
                 return format_response(
                     {
                         "month": target_month,
+                        "account_type": account_type,
                         "transactions": transactions,
                         "count": len(transactions),
                         "total": round(total, 2),
@@ -102,7 +113,14 @@ async def monzo_spending(
             ).fetchall()
 
             if not rows:
-                return format_response({"month": target_month, "categories": [], "grand_total": 0})
+                return format_response(
+                    {
+                        "month": target_month,
+                        "account_type": account_type,
+                        "categories": [],
+                        "grand_total": 0,
+                    }
+                )
 
             categories = []
             grand_total = 0
@@ -136,6 +154,7 @@ async def monzo_spending(
 
             result = {
                 "month": target_month,
+                "account_type": account_type,
                 "categories": categories,
                 "grand_total": round(grand_total, 2),
                 "top_merchants": top_merchants,

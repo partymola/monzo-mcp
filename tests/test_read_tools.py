@@ -106,12 +106,46 @@ def _seed_mixed(db):
     )
 
 
+class TestAccountEcho(unittest.TestCase):
+    """An empty result must say which account it looked in."""
+
+    def test_list_names_the_account_filter(self):
+        db = _make_db()
+        _seed_mixed(db)
+        result = _call(transaction_tools.monzo_list_transactions, db, account_type="personal")
+        self.assertEqual(result["account_type"], "personal")
+
+    def test_search_names_the_account_filter(self):
+        db = _make_db()
+        _seed_mixed(db)
+        result = _call(
+            transaction_tools.monzo_search_transactions, db, query="coffee", account_type="personal"
+        )
+        self.assertEqual(result["account_type"], "personal")
+
+    def test_unfiltered_echo_is_explicit_null_not_absent(self):
+        # null distinguishes "searched every account" from "the key is missing"
+        db = _make_db()
+        _seed_mixed(db)
+        result = _call(transaction_tools.monzo_list_transactions, db)
+        self.assertIn("account_type", result)
+        self.assertIsNone(result["account_type"])
+
+    def test_empty_search_still_names_the_account(self):
+        db = _make_db()
+        _seed_mixed(db)
+        result = _call(
+            transaction_tools.monzo_search_transactions, db, query="zzz", account_type="joint"
+        )
+        self.assertEqual(result, {"account_type": "joint", "transactions": []})
+
+
 class TestListCounterparty(unittest.TestCase):
     def test_transfer_includes_counterparty_and_card_does_not(self):
         db = _make_db()
         _seed_mixed(db)
         result = _call(transaction_tools.monzo_list_transactions, db)
-        by_id = {t["id"]: t for t in result}
+        by_id = {t["id"]: t for t in result["transactions"]}
 
         self.assertEqual(
             by_id["tx_transfer"]["counterparty"],
@@ -129,20 +163,21 @@ class TestSearchCounterparty(unittest.TestCase):
         db = _make_db()
         _seed_mixed(db)
         result = _call(transaction_tools.monzo_search_transactions, db, query="acme solar")
-        self.assertEqual([t["id"] for t in result], ["tx_transfer"])
-        self.assertEqual(result[0]["counterparty"]["name"], "Acme Solar LLP")
+        txns = result["transactions"]
+        self.assertEqual([t["id"] for t in txns], ["tx_transfer"])
+        self.assertEqual(txns[0]["counterparty"]["name"], "Acme Solar LLP")
 
     def test_search_still_matches_merchant(self):
         db = _make_db()
         _seed_mixed(db)
         result = _call(transaction_tools.monzo_search_transactions, db, query="coffee")
-        self.assertEqual([t["id"] for t in result], ["tx_card"])
+        self.assertEqual([t["id"] for t in result["transactions"]], ["tx_card"])
 
     def test_search_no_match_returns_empty(self):
         db = _make_db()
         _seed_mixed(db)
         result = _call(transaction_tools.monzo_search_transactions, db, query="zzz-nomatch")
-        self.assertEqual(result, [])
+        self.assertEqual(result["transactions"], [])
 
 
 if __name__ == "__main__":

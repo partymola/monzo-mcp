@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** every account-scoped tool now names the account in its response, under one key. `monzo_list_pots`, `monzo_list_transactions` and `monzo_search_transactions` return `{"account_type": ..., "pots"/"transactions": [...]}` instead of a bare array; `monzo_spending` gains `account_type` on all four result shapes; and `monzo_sync`'s per-account details rename `account` to `account_type`. An empty array previously carried no trace of which account produced it, so "nothing there" and "wrong account" were indistinguishable - and the sync response was the one place calling this field `account` while every tool argument is `account_type`, which makes passing the wrong argument name easy. Where no account filter is given the value is `null`, keeping "all accounts" distinct from a missing key.
+
 ## [0.3.0] - 2026-07-18
 
 ### Added

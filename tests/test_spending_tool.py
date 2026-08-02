@@ -288,5 +288,34 @@ class TestSpendingTool(unittest.TestCase):
         db_factory.assert_not_called()
 
 
+class TestAccountEcho(unittest.TestCase):
+    """A zero total must say which account it was measuring."""
+
+    def test_summary_names_the_account_filter(self):
+        result = run_spending(make_db(), month="2026-02", account_type="personal")
+        self.assertEqual(result["account_type"], "personal")
+
+    def test_detail_names_the_account_filter(self):
+        result = run_spending(make_db(), month="2026-02", detail=True, account_type="personal")
+        self.assertEqual(result["account_type"], "personal")
+
+    def test_empty_summary_still_names_the_account(self):
+        # 2025-12 predates every fixture transaction, so this hits the no-rows path
+        result = run_spending(make_db(), month="2025-12", account_type="joint")
+        self.assertEqual(result["account_type"], "joint")
+        self.assertEqual(result["categories"], [])
+        self.assertEqual(result["grand_total"], 0)
+
+    def test_empty_detail_still_names_the_account(self):
+        result = run_spending(make_db(), month="2025-12", detail=True, account_type="joint")
+        self.assertEqual(result["account_type"], "joint")
+        self.assertEqual(result["transactions"], [])
+
+    def test_unfiltered_echo_is_explicit_null_not_absent(self):
+        result = run_spending(make_db(), month="2026-02")
+        self.assertIn("account_type", result)
+        self.assertIsNone(result["account_type"])
+
+
 if __name__ == "__main__":
     unittest.main()

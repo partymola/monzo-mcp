@@ -349,7 +349,7 @@ class TestAccountSelection(unittest.TestCase):
         result = _run(fake, _make_db(), account_type="joint")
 
         self.assertEqual(result["accounts_synced"], 1)
-        self.assertEqual(result["details"][0]["account"], "joint")
+        self.assertEqual(result["details"][0]["account_type"], "joint")
         # The personal account is filtered out before any transaction fetch.
         self.assertEqual(fake.txn_calls_for("acc_personal"), [])
         self.assertEqual(len(fake.txn_calls_for("acc_joint")), 1)

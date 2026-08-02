@@ -95,7 +95,7 @@ def run_sync(account_type: str | None = None, since: str | None = None) -> dict:
             if account_type and atype != account_type:
                 continue
 
-            detail = {"account": atype}
+            detail = {"account_type": atype}
 
             try:
                 bal = api.get(f"/balance?account_id={acct_id}")
@@ -297,6 +297,9 @@ async def monzo_list_transactions(
     (faster payments, p2p, bacs) include a `counterparty` object with the payee
     name and, where the scheme provides them, sort code and account number.
 
+    Returns `{"account_type": ..., "transactions": [...]}`, where account_type
+    echoes the filter applied and is null when unfiltered.
+
     Args:
         account_type: "personal" or "joint" (default: all)
         since: Start date in ISO format, e.g. "2026-01-01" (inclusive)
@@ -347,7 +350,12 @@ async def monzo_list_transactions(
                 f"SELECT * FROM monzo_transactions WHERE {where} ORDER BY created DESC LIMIT ?",
                 params,
             ).fetchall()
-            return format_response([_format_transaction(r) for r in rows])
+            return format_response(
+                {
+                    "account_type": account_type,
+                    "transactions": [_format_transaction(r) for r in rows],
+                }
+            )
         finally:
             db.close()
 
@@ -370,6 +378,9 @@ async def monzo_search_transactions(
     Case-insensitive partial match across merchant_name, counterparty_name,
     description, and notes fields. Counterparty matching finds bank transfers
     (faster payments, p2p, bacs) by payee name.
+
+    Returns `{"account_type": ..., "transactions": [...]}`, where account_type
+    echoes the filter applied and is null when unfiltered.
 
     Args:
         query: Search term
@@ -417,7 +428,12 @@ async def monzo_search_transactions(
                 f"SELECT * FROM monzo_transactions WHERE {where} ORDER BY created DESC LIMIT ?",
                 params,
             ).fetchall()
-            return format_response([_format_transaction(r) for r in rows])
+            return format_response(
+                {
+                    "account_type": account_type,
+                    "transactions": [_format_transaction(r) for r in rows],
+                }
+            )
         finally:
             db.close()
 
