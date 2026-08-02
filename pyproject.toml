@@ -16,19 +16,18 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Topic :: Office/Business :: Financial",
 ]
+# Every dependency is pinned to an exact version that the suite has been run
+# against. A range leaves the choice to the resolver, which is how `mcp` 2.0.0
+# reached installs unannounced and broke them. Bump deliberately, never by
+# widening a spec.
 dependencies = [
-    # Capped below 2.0: the server is built on `mcp.server.fastmcp`, which 2.0.0
-    # no longer ships. Lifting the cap means porting to its replacement first.
-    "mcp>=1.6.0,<2",
+    "mcp==2.0.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.3.5",
-    # Pinned exactly so local and CI lint are deterministic: ruff's formatter
-    # changes between releases, and an unpinned spec lets CI pull a newer ruff
-    # that reformats code an older local ruff had passed. Bump deliberately.
-    "ruff==0.15.20",
+    "pytest==9.1.1",
+    "ruff==0.16.1",
 ]
 
 [project.scripts]

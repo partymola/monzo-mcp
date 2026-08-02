@@ -23,7 +23,7 @@ The `scripts/check-no-data.sh` pre-commit hook enforces most of this - install i
 ## Architecture
 
 - **Entry point**: `src/main.py` - routes the `auth` subcommand or starts the MCP stdio server
-- **FastMCP**: `mcp_instance.py` creates the shared `FastMCP("monzo-server")` instance
+- **MCP server**: `mcp_instance.py` creates the shared `MCPServer("monzo-server")` instance
 - **Auth**: `auth.py` - OAuth setup CLI + token refresh (5-min expiry buffer). Redirect `http://localhost:6600/callback`; SCA window is 5 min after app approval for full history, then 90 days only
 - **API**: `api.py` - GET-only wrapper with auto-refresh and typed exceptions (read-only by design; no write path exists)
 - **DB**: `db.py` - SQLite schema, `get_db()`, `migrate()` (ALTER TABLE for columns added after a DB was created), balance/sync helpers

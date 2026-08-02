@@ -1,3 +1,3 @@
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
-mcp = FastMCP("monzo-server")
+mcp = MCPServer("monzo-server")
