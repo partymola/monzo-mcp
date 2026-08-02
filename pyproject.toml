@@ -17,7 +17,9 @@ classifiers = [
     "Topic :: Office/Business :: Financial",
 ]
 dependencies = [
-    "mcp>=1.6.0",
+    # Capped below 2.0: the server is built on `mcp.server.fastmcp`, which 2.0.0
+    # no longer ships. Lifting the cap means porting to its replacement first.
+    "mcp>=1.6.0,<2",
 ]
 
 [project.optional-dependencies]
