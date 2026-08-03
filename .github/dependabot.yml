@@ -1,0 +1,40 @@
+version: 2
+
+updates:
+  # Python dependencies. The `uv` ecosystem updates uv.lock alongside
+  # pyproject.toml; `pip` would bump the manifest and leave the lock stale.
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 3
+      semver-major-days: 7
+    groups:
+      # Test and lint tooling moves often and rarely needs thought; batching it
+      # keeps the queue readable. Runtime dependencies are deliberately left
+      # ungrouped so each arrives as its own pull request - `mcp` 2.0.0 removed
+      # the module this server was built on, and a change of that kind has to be
+      # read rather than merged with a batch.
+      dev-tooling:
+        patterns:
+          - "pytest*"
+          - "ruff"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    groups:
+      actions:
+        patterns:
+          - "*"
