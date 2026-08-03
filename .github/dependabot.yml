@@ -28,6 +28,16 @@ updates:
     schedule:
       interval: "weekly"
       day: "monday"
+    cooldown:
+      # Digest rebuilds are the security-patch path and should arrive quickly.
+      # A Python version move is a decision about what the published image
+      # runs, so let it settle before it lands as a pull request. It is
+      # deliberately not ignored: Python ships one of these a year, and that
+      # annual pull request is what stops the pinned release reaching its
+      # end-of-life with nothing saying so.
+      default-days: 7
+      semver-minor-days: 90
+      semver-major-days: 90
 
   - package-ecosystem: "github-actions"
     directory: "/"
