@@ -55,7 +55,7 @@ Tests are fully offline - no real API calls, no real tokens. Fixtures use fictio
 
 ## Releases (maintainers)
 
-1. Bump `version` in `pyproject.toml` and turn the `[Unreleased]` CHANGELOG heading into `## [X.Y.Z] - YYYY-MM-DD`, adding the compare link at the foot of the file.
+1. Bump `version` in `pyproject.toml`, run `uv lock` so the tracked lockfile records the new version, and turn the `[Unreleased]` CHANGELOG heading into `## [X.Y.Z] - YYYY-MM-DD`, adding the compare link at the foot of the file.
 2. Push to `main` and wait for CI to pass on that commit.
 3. Tag it `vX.Y.Z` and push the tag by name.
 4. Create the GitHub Release.
