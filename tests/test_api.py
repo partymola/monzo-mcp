@@ -182,5 +182,74 @@ class TestReadOnlyContract(unittest.TestCase):
             self.assertFalse(hasattr(api, verb), f"unexpected write verb: api.{verb}")
 
 
+class TestRefreshFailuresAreClassified(unittest.TestCase):
+    """api.get maps the two types refresh_token guarantees, and nothing else.
+
+    It used to catch a tuple of builtins, so the classification depended on
+    remembering every type auth could raise - which is how a bare OSError, an
+    http.client exception and a decode failure were each graded a dead
+    credential in turn. Monzo rotates the refresh token on use and the token
+    file is shared, so that answer is the destructive one.
+    """
+
+    def _get_with_refresh_raising(self, exc):
+        with patch.object(api, "refresh_token", side_effect=exc):
+            return api.get("/accounts")
+
+    def test_a_refusal_becomes_an_auth_error(self):
+        with self.assertRaises(MonzoAuthError):
+            self._get_with_refresh_raising(auth.TokenRefused("revoked"))
+
+    def test_a_network_failure_is_not_an_auth_failure(self):
+        with self.assertRaises(MonzoAPIError) as caught:
+            self._get_with_refresh_raising(auth.RefreshNetworkError("no route"))
+        self.assertNotIsInstance(caught.exception, MonzoAuthError)
+
+    def test_the_auth_message_is_fixed_text(self):
+        """This string reaches the MCP client, so nothing may be interpolated."""
+        with self.assertRaises(MonzoAuthError) as caught:
+            self._get_with_refresh_raising(auth.TokenRefused("/etc/secret/path is missing"))
+        self.assertEqual(
+            str(caught.exception), "Could not obtain an access token. Run: monzo-mcp auth"
+        )
+
+    def test_the_network_message_is_fixed_text(self):
+        with self.assertRaises(MonzoAPIError) as caught:
+            self._get_with_refresh_raising(auth.RefreshNetworkError("/etc/secret/path timed out"))
+        self.assertEqual(str(caught.exception), "Network error. Check your connection.")
+
+
+class TestTheRefreshBoundary(unittest.TestCase):
+    """Every exit from refresh_token is one of two types, by construction."""
+
+    def _refresh_with_worker_raising(self, exc):
+        with patch.object(auth, "_refresh_token", side_effect=exc):
+            return auth.refresh_token()
+
+    def test_an_unclassified_failure_becomes_a_network_error(self):
+        import http.client
+
+        for exc in (
+            TimeoutError("bare timeout"),
+            ConnectionResetError("reset"),
+            UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid"),
+            KeyError("access_token"),
+            ValueError("unparseable"),
+            RuntimeError("something nobody classified"),
+            http.client.BadStatusLine("garbage"),
+        ):
+            with self.subTest(exc=type(exc).__name__):
+                with self.assertRaises(auth.RefreshNetworkError):
+                    self._refresh_with_worker_raising(exc)
+
+    def test_a_refusal_is_passed_through_unchanged(self):
+        with self.assertRaises(auth.TokenRefused):
+            self._refresh_with_worker_raising(auth.TokenRefused("revoked"))
+
+    def test_the_boundary_does_not_swallow_a_successful_refresh(self):
+        with patch.object(auth, "_refresh_token", return_value="a-token"):
+            self.assertEqual(auth.refresh_token(), "a-token")
+
+
 if __name__ == "__main__":
     unittest.main()

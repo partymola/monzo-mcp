@@ -8,6 +8,7 @@ the stored expiry timestamps are exact, not approximate.
 
 import io
 import json
+import pathlib
 import sys
 import tempfile
 import unittest
@@ -15,7 +16,7 @@ import urllib.error
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from monzo_mcp import auth
 
@@ -165,16 +166,149 @@ class TestRefreshToken(unittest.TestCase):
         self.assertIn("refresh token", str(ctx.exception).lower())
         self.assertEqual(called["n"], 0)  # never hit the network
 
-    def test_refresh_network_error_raises_runtime_error(self):
+    def test_refresh_network_error_does_not_advise_reauthorising(self):
+        """A server that cannot be reached says nothing about the credentials.
+
+        Advising re-authorisation here rewrites the token file the syncing
+        host owns, in answer to something that clears on its own.
+        """
+
         def urlopen(req, timeout=None):
             raise urllib.error.URLError("connection refused")
+
+        with self.assertRaises(auth.RefreshNetworkError) as ctx:
+            self._refresh(
+                {"access_token": "stale", "refresh_token": "r1", "expiry": 0},
+                urlopen=urlopen,
+            )
+        self.assertNotIn("monzo-mcp auth", str(ctx.exception))
+
+    def test_refresh_refused_by_the_server_advises_reauthorising(self):
+        def urlopen(req, timeout=None):
+            raise urllib.error.HTTPError("https://example.invalid", 401, "no", {}, io.BytesIO(b""))
 
         with self.assertRaises(RuntimeError) as ctx:
             self._refresh(
                 {"access_token": "stale", "refresh_token": "r1", "expiry": 0},
                 urlopen=urlopen,
             )
+        self.assertNotIsInstance(ctx.exception, auth.RefreshNetworkError)
         self.assertIn("monzo-mcp auth", str(ctx.exception))
+
+    def test_a_read_timeout_is_not_treated_as_a_refusal(self):
+        """urlopen wraps only connect-phase errors, so this arrives bare."""
+
+        def urlopen(req, timeout=None):
+            raise TimeoutError("timed out")
+
+        with self.assertRaises(auth.RefreshNetworkError):
+            self._refresh(
+                {"access_token": "stale", "refresh_token": "r1", "expiry": 0},
+                urlopen=urlopen,
+            )
+
+    def test_a_reset_connection_is_not_treated_as_a_refusal(self):
+        def urlopen(req, timeout=None):
+            raise ConnectionResetError("reset")
+
+        with self.assertRaises(auth.RefreshNetworkError):
+            self._refresh(
+                {"access_token": "stale", "refresh_token": "r1", "expiry": 0},
+                urlopen=urlopen,
+            )
+
+    def test_a_forbidden_response_is_not_treated_as_a_refusal(self):
+        """403 is what a WAF returns, and this client reads it as SCA elsewhere."""
+
+        def urlopen(req, timeout=None):
+            raise urllib.error.HTTPError("https://example.invalid", 403, "no", {}, io.BytesIO(b""))
+
+        with self.assertRaises(auth.RefreshNetworkError):
+            self._refresh(
+                {"access_token": "stale", "refresh_token": "r1", "expiry": 0},
+                urlopen=urlopen,
+            )
+
+    def test_a_bad_request_is_treated_as_a_refusal(self):
+        def urlopen(req, timeout=None):
+            raise urllib.error.HTTPError("https://example.invalid", 400, "bad", {}, io.BytesIO(b""))
+
+        with self.assertRaises(auth.TokenRefused):
+            self._refresh(
+                {"access_token": "stale", "refresh_token": "r1", "expiry": 0},
+                urlopen=urlopen,
+            )
+
+    def test_an_undecodable_body_is_not_treated_as_a_refusal(self):
+        """UnicodeDecodeError is a ValueError, which used to read as a refusal."""
+
+        def urlopen(req, timeout=None):
+            resp = MagicMock()
+            resp.read.return_value = b"\xe9\xff not utf-8"
+            cm = MagicMock()
+            cm.__enter__.return_value = resp
+            cm.__exit__.return_value = False
+            return cm
+
+        with self.assertRaises(auth.RefreshNetworkError):
+            self._refresh(
+                {"access_token": "stale", "refresh_token": "r1", "expiry": 0},
+                urlopen=urlopen,
+            )
+
+    def test_a_non_http_response_is_not_treated_as_a_refusal(self):
+        import http.client
+
+        def urlopen(req, timeout=None):
+            raise http.client.BadStatusLine("GARBAGE NOT HTTP")
+
+        with self.assertRaises(auth.RefreshNetworkError):
+            self._refresh(
+                {"access_token": "stale", "refresh_token": "r1", "expiry": 0},
+                urlopen=urlopen,
+            )
+
+    def test_a_response_that_is_not_json_is_not_treated_as_a_refusal(self):
+        def urlopen(req, timeout=None):
+            resp = MagicMock()
+            resp.read.return_value = b"<html>captive portal</html>"
+            cm = MagicMock()
+            cm.__enter__.return_value = resp
+            cm.__exit__.return_value = False
+            return cm
+
+        with self.assertRaises(auth.RefreshNetworkError):
+            self._refresh(
+                {"access_token": "stale", "refresh_token": "r1", "expiry": 0},
+                urlopen=urlopen,
+            )
+
+    def test_a_response_of_the_wrong_shape_is_refused(self):
+        def urlopen(req, timeout=None):
+            resp = MagicMock()
+            resp.read.return_value = b'["not", "an", "object"]'
+            cm = MagicMock()
+            cm.__enter__.return_value = resp
+            cm.__exit__.return_value = False
+            return cm
+
+        with self.assertRaises(RuntimeError):
+            self._refresh(
+                {"access_token": "stale", "refresh_token": "r1", "expiry": 0},
+                urlopen=urlopen,
+            )
+
+    def test_a_rate_limit_is_not_treated_as_a_refusal(self):
+        def urlopen(req, timeout=None):
+            raise urllib.error.HTTPError(
+                "https://example.invalid", 429, "slow", {}, io.BytesIO(b"")
+            )
+
+        with self.assertRaises(auth.RefreshNetworkError):
+            self._refresh(
+                {"access_token": "stale", "refresh_token": "r1", "expiry": 0},
+                urlopen=urlopen,
+            )
 
     def test_tokens_and_creds_lazy_loaded_from_disk_when_cache_empty(self):
         loaded = []
@@ -411,3 +545,46 @@ class TestSetupAuth(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCredentialFilesAreRefusals(unittest.TestCase):
+    """No usable credential file is a refusal, not a transport failure.
+
+    It will not clear on its own, and the user does have to re-authorise - the
+    one case where that advice is right.
+    """
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self._dir.name)
+        auth._cached_tokens = None
+        auth._cached_creds = None
+
+    def tearDown(self):
+        self._dir.cleanup()
+        auth._cached_tokens = None
+        auth._cached_creds = None
+
+    def _refresh_with_files(self, tokens=None, creds='{"client_id": "i", "client_secret": "s"}'):
+        tokens_path = self.dir / "monzo_tokens.json"
+        creds_path = self.dir / "monzo_client.json"
+        if tokens is not None:
+            tokens_path.write_text(tokens)
+        creds_path.write_text(creds)
+        with (
+            patch.object(auth, "MONZO_TOKENS_PATH", tokens_path),
+            patch.object(auth, "MONZO_CLIENT_PATH", creds_path),
+        ):
+            return auth.refresh_token()
+
+    def test_a_missing_token_file_is_a_refusal(self):
+        with self.assertRaises(auth.TokenRefused):
+            self._refresh_with_files(tokens=None)
+
+    def test_an_unparseable_token_file_is_a_refusal(self):
+        with self.assertRaises(auth.TokenRefused):
+            self._refresh_with_files(tokens="{not json")
+
+    def test_a_token_file_of_the_wrong_shape_is_a_refusal(self):
+        with self.assertRaises(auth.TokenRefused):
+            self._refresh_with_files(tokens='["not", "an", "object"]')

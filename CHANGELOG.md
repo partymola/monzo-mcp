@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Every way of failing to obtain an access token is now classified, and reaches callers as one of two outcomes rather than escaping. Only a refusal is an authentication failure: HTTP 400 or 401, a response carrying no token, or credentials that are missing, unreadable or malformed. Everything else is a network error - an unreachable server, a read timeout, a reset connection, a truncated or non-HTTP response, a body that will not decode, a 403, a rate limit, and a 5xx.
+
+  The classification is made where the token is obtained, with a catch-all at that boundary, so an unanticipated failure is a network error by construction rather than by listing exception types. The distinction matters because an authentication failure tells the user to re-authorise, which rewrites the shared token file and spends the refresh token the syncing host owns - the wrong answer to a rate limit or a dropped connection, both of which clear on their own. 403 is treated as a network condition: it is what a WAF returns, and this client already reads 403 on a data request as a Strong Customer Authentication prompt.
+- The message reported when a token cannot be obtained is fixed text. It previously carried the underlying exception, which for a credential-file failure is an absolute path, into a string that reaches the MCP client.
+
 ### Packaging
 
 - The container image is built on Python 3.14 instead of 3.13, and 3.14 joins the supported-version classifiers. `requires-python` is unchanged at `>=3.13`: the package still supports both, and only the published image moves. Installing from PyPI is unaffected - that uses whichever Python the user already has.

@@ -5,7 +5,7 @@ import logging
 import urllib.error
 import urllib.request
 
-from .auth import refresh_token
+from .auth import RefreshNetworkError, TokenRefused, refresh_token
 from .config import MONZO_API_BASE
 
 logger = logging.getLogger(__name__)
@@ -28,7 +28,17 @@ def get(path: str) -> dict:
 
     Automatically refreshes the access token if expired.
     """
-    token = refresh_token()
+    # refresh_token classifies its own failures, so there is no exception tuple
+    # here to get wrong. The messages are fixed rather than built from the
+    # original, which can carry an absolute config path into a response the MCP
+    # client sees.
+    try:
+        token = refresh_token()
+    except TokenRefused as e:
+        raise MonzoAuthError("Could not obtain an access token. Run: monzo-mcp auth") from e
+    except RefreshNetworkError as e:
+        raise MonzoAPIError("Network error. Check your connection.") from e
+
     url = f"{MONZO_API_BASE}{path}"
     req = urllib.request.Request(
         url,
