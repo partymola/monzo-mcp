@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-08-09
+
 ### Fixed
 
 - Every way of failing to obtain an access token is now classified, and reaches callers as one of two outcomes rather than escaping. Only a refusal is an authentication failure: HTTP 400 or 401, a response carrying no token, or credentials that are missing, unreadable or malformed. Everything else is a network error - an unreachable server, a read timeout, a reset connection, a truncated or non-HTTP response, a body that will not decode, a 403, a rate limit, and a 5xx.
@@ -74,7 +76,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Transaction search across merchant name, description, and notes.
 - Pre-commit hook (`scripts/check-no-data.sh`) blocking commit of databases, tokens, and other secrets.
 
-[Unreleased]: https://github.com/partymola/monzo-mcp/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/partymola/monzo-mcp/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/partymola/monzo-mcp/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/partymola/monzo-mcp/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/partymola/monzo-mcp/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/partymola/monzo-mcp/compare/v0.2.1...v0.3.0
