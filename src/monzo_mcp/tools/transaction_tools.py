@@ -1,7 +1,7 @@
 """Transaction sync, listing, and search tools."""
 
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 import anyio
 
@@ -115,7 +115,9 @@ def run_sync(account_type: str | None = None, since: str | None = None) -> dict:
                 )
                 detail["balance"] = pence_to_pounds(bal["balance"])
             except Exception as e:
-                detail["balance_error"] = str(e)
+                # Type only, as the catch-all below. A bare except cannot know
+                # what its message set contains, and this reaches the model.
+                detail["balance_error"] = type(e).__name__
 
             try:
                 pots_data = api.get(f"/pots?current_account_id={acct_id}")
@@ -132,7 +134,7 @@ def run_sync(account_type: str | None = None, since: str | None = None) -> dict:
                         pot_count += 1
                 detail["pots_synced"] = pot_count
             except Exception as e:
-                detail["pots_error"] = str(e)
+                detail["pots_error"] = type(e).__name__
 
             since = since_override or (datetime.now(timezone.utc) - timedelta(days=335)).strftime(
                 "%Y-%m-%dT00:00:00Z"
@@ -288,8 +290,15 @@ def auto_sync_if_stale() -> None:
     Silently swallows all errors.
     """
     try:
-        last_attempt = get_last_sync_attempt(get_db())
-        today = date.today().isoformat()
+        conn = get_db()
+        try:
+            last_attempt = get_last_sync_attempt(conn)
+        finally:
+            conn.close()
+        # Both sides UTC. log_sync stores a UTC timestamp, so comparing it
+        # against a local date leaves a window each night where the row just
+        # written is dated behind today and the throttle never fires.
+        today = datetime.now(timezone.utc).date().isoformat()
         if last_attempt is None or last_attempt[:10] < today:
             run_sync()
     except Exception:

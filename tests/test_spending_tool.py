@@ -232,6 +232,121 @@ class TestSpendingTool(unittest.TestCase):
         self.assertEqual(vs["change"], 75.0)
         self.assertEqual(vs["change_pct"], 187.5)
 
+    def test_vs_previous_applies_the_same_filters_as_the_month_it_compares(self):
+        """A filtered month against an unfiltered one is not a comparison.
+
+        It reports the difference between two different questions as a
+        percentage change, in the tool whose whole purpose is comparison.
+        """
+        txns = [
+            # This month: personal 10.00, joint 90.00.
+            (
+                "p1",
+                "acc_p",
+                "personal",
+                "2026-02-05T09:00:00Z",
+                -1000,
+                "GBP",
+                "ACME GROCERS",
+                "Acme Grocers",
+                "groceries",
+                "",
+                "2026-02-05",
+            ),
+            (
+                "j1",
+                "acc_j",
+                "joint",
+                "2026-02-06T09:00:00Z",
+                -9000,
+                "GBP",
+                "CORNER CAFE",
+                "Corner Cafe",
+                "eating_out",
+                "",
+                "2026-02-06",
+            ),
+            # Last month: the same personal 10.00, the same joint 90.00.
+            (
+                "p0",
+                "acc_p",
+                "personal",
+                "2026-01-05T09:00:00Z",
+                -1000,
+                "GBP",
+                "ACME GROCERS",
+                "Acme Grocers",
+                "groceries",
+                "",
+                "2026-01-05",
+            ),
+            (
+                "j0",
+                "acc_j",
+                "joint",
+                "2026-01-06T09:00:00Z",
+                -9000,
+                "GBP",
+                "CORNER CAFE",
+                "Corner Cafe",
+                "eating_out",
+                "",
+                "2026-01-06",
+            ),
+        ]
+        result = run_spending(make_db(txns), account_type="personal")
+        vs = result["vs_previous"]
+        self.assertEqual(vs["previous_total"], 10.0)
+        self.assertEqual(vs["change"], 0.0)
+        self.assertEqual(vs["change_pct"], 0.0)
+
+    def test_vs_previous_applies_a_category_filter_too(self):
+        txns = [
+            (
+                "g1",
+                "acc_p",
+                "personal",
+                "2026-02-05T09:00:00Z",
+                -1000,
+                "GBP",
+                "ACME GROCERS",
+                "Acme Grocers",
+                "groceries",
+                "",
+                "2026-02-05",
+            ),
+            (
+                "g0",
+                "acc_p",
+                "personal",
+                "2026-01-05T09:00:00Z",
+                -1000,
+                "GBP",
+                "ACME GROCERS",
+                "Acme Grocers",
+                "groceries",
+                "",
+                "2026-01-05",
+            ),
+            (
+                "e0",
+                "acc_p",
+                "personal",
+                "2026-01-06T09:00:00Z",
+                -9000,
+                "GBP",
+                "CORNER CAFE",
+                "Corner Cafe",
+                "eating_out",
+                "",
+                "2026-01-06",
+            ),
+        ]
+        result = run_spending(make_db(txns), category="groceries")
+        vs = result["vs_previous"]
+        self.assertEqual(vs["previous_total"], 10.0)
+        self.assertEqual(vs["change_pct"], 0.0)
+
     def test_no_vs_previous_when_month_explicit(self):
         # An explicit month must not attach a month-over-month comparison.
         result = run_spending(make_db(), month="2026-02")

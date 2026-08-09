@@ -167,6 +167,18 @@ class TestSearchCounterparty(unittest.TestCase):
         self.assertEqual([t["id"] for t in txns], ["tx_transfer"])
         self.assertEqual(txns[0]["counterparty"]["name"], "Acme Solar LLP")
 
+    def test_search_matches_a_payee_the_description_does_not_name(self):
+        """tx_transfer's description repeats its counterparty, so matching it
+        proves nothing: the description clause alone would find it.
+
+        tx_p2p has a blank description, so it is reachable only through
+        counterparty_name.
+        """
+        db = _make_db()
+        _seed_mixed(db)
+        result = _call(transaction_tools.monzo_search_transactions, db, query="jane doe")
+        self.assertEqual([t["id"] for t in result["transactions"]], ["tx_p2p"])
+
     def test_search_still_matches_merchant(self):
         db = _make_db()
         _seed_mixed(db)

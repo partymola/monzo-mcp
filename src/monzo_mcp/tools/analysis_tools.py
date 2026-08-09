@@ -162,12 +162,22 @@ async def monzo_spending(
 
             if not month:
                 prev_month = (date.today().replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+                # The same category and account filters as the month above it.
+                # Comparing a filtered month against an unfiltered one reports
+                # the difference between two different questions as a change.
+                prev_conditions = ["amount < 0", "created LIKE ?"]
+                prev_params = [f"{prev_month}%"]
+                if category:
+                    prev_conditions.append("category = ?")
+                    prev_params.append(category)
+                if account_type:
+                    prev_conditions.append("account_type = ?")
+                    prev_params.append(account_type)
+
                 prev_total_row = db.execute(
-                    (
-                        "SELECT SUM(amount) FROM monzo_transactions "
-                        "WHERE amount < 0 AND created LIKE ?"
-                    ),
-                    (f"{prev_month}%",),
+                    "SELECT SUM(amount) FROM monzo_transactions "
+                    f"WHERE {' AND '.join(prev_conditions)}",
+                    prev_params,
                 ).fetchone()[0]
 
                 if prev_total_row:

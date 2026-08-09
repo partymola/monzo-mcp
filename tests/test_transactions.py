@@ -5,11 +5,12 @@ client is mocked and the cache is in-memory SQLite, so no credentials or network
 are needed. Expected values are hand-derived from the fixtures.
 """
 
+import json
 import pathlib
 import sqlite3
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
@@ -521,6 +522,86 @@ class TestTheAutoSyncThrottleCountsAttempts(unittest.TestCase):
 
     def test_a_failure_today_still_throttles_the_rest_of_the_day(self):
         assert self._runs_after_a_failure_today() == 0
+
+    def test_a_local_date_ahead_of_utc_does_not_defeat_the_throttle(self):
+        """log_sync stores UTC; comparing it to a local date reopens the storm.
+
+        East of Greenwich there is a window each night where the row just
+        written is dated behind the local today, so the gate never closes and
+        never self-corrects - one hour in BST, half a day at UTC+13.
+        """
+        tmp = tempfile.TemporaryDirectory()
+        db_path = pathlib.Path(tmp.name) / "monzo.db"
+        db_conn = sqlite3.connect(db_path)
+        db_conn.row_factory = sqlite3.Row
+        db_conn.executescript(SCHEMA)
+        # 23:30 UTC on the 9th: a sync that has only just finished.
+        db_conn.execute(
+            "INSERT INTO sync_log (synced_at, status, records_added, notes) VALUES (?, ?, ?, ?)",
+            (datetime(2026, 8, 9, 23, 30, tzinfo=timezone.utc).isoformat(), "ok", 0, ""),
+        )
+        db_conn.commit()
+
+        class _LocalIsAheadDate(date):
+            @classmethod
+            def today(cls):
+                return cls(2026, 8, 10)
+
+        class _FixedUTC(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(2026, 8, 9, 23, 35, tzinfo=timezone.utc)
+
+        ran = {"n": 0}
+        with (
+            patch.object(transaction_tools, "get_db", return_value=db_conn),
+            # create=True so this still binds if the module stops importing
+            # date at all - which is the shape that passes.
+            patch.object(transaction_tools, "date", _LocalIsAheadDate, create=True),
+            patch.object(transaction_tools, "datetime", _FixedUTC),
+            patch.object(transaction_tools, "run_sync", lambda *a, **k: ran.__setitem__("n", 1)),
+        ):
+            transaction_tools.auto_sync_if_stale()
+        tmp.cleanup()
+
+        assert ran["n"] == 0
+
+
+class TestNoExceptionTextReachesTheModel(unittest.TestCase):
+    """A bare except cannot know what its message set holds.
+
+    These details are returned to the model, so they carry the type only -
+    the same rule the trailing catch-all already follows.
+    """
+
+    def _details_when_balance_and_pots_fail(self, exc):
+        tmp = tempfile.TemporaryDirectory()
+        db_path = pathlib.Path(tmp.name) / "monzo.db"
+        db_conn = sqlite3.connect(db_path)
+        db_conn.row_factory = sqlite3.Row
+        db_conn.executescript(SCHEMA)
+
+        def fake_get(path):
+            if path == "/accounts":
+                return {"accounts": [{"id": "acc_1", "type": "uk_retail", "closed": False}]}
+            if path.startswith("/balance") or path.startswith("/pots"):
+                raise exc
+            return {"transactions": []}
+
+        with (
+            patch.object(transaction_tools, "get_db", return_value=db_conn),
+            patch.object(transaction_tools.api, "get", side_effect=fake_get),
+        ):
+            result = transaction_tools.run_sync()
+        tmp.cleanup()
+        return result["details"][0]
+
+    def test_neither_balance_nor_pots_repeats_the_message(self):
+        secret = "token file /home/alice/.config/monzo_tokens.json unreadable"
+        detail = self._details_when_balance_and_pots_fail(RuntimeError(secret))
+        assert detail["balance_error"] == "RuntimeError"
+        assert detail["pots_error"] == "RuntimeError"
+        assert "/home/alice" not in json.dumps(detail)
 
     def test_a_stale_cache_does_still_trigger_a_sync(self):
         """The companion assertion.
