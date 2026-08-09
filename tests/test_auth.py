@@ -18,6 +18,7 @@ from datetime import datetime
 from io import StringIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from urllib.parse import quote
 
 from monzo_mcp import auth
 
@@ -353,11 +354,18 @@ class _FakeConfigDir:
         pass
 
 
-def _server_factory(callback_path, recorded):
-    """Return an HTTPServer stand-in that drives the callback handler once."""
+def _server_factory(callback_path, recorded, bound=None):
+    """Return an HTTPServer stand-in that drives the callback handler once.
+
+    `bound` collects the address tuple. What the server binds to is the whole
+    of what makes the callback reachable from a published container port, and
+    nothing the handler does afterwards reveals it.
+    """
 
     class _FakeServer:
         def __init__(self, addr, handler_cls):
+            if bound is not None:
+                bound.append(addr)
             self._handler_cls = handler_cls
 
         def handle_request(self):
@@ -376,12 +384,13 @@ def _server_factory(callback_path, recorded):
 
 
 class _SetupResult:
-    def __init__(self, saved, recorded, token_req, stdout, exit_code):
+    def __init__(self, saved, recorded, token_req, stdout, exit_code, bound=None):
         self.saved = saved  # {path: data}
         self.recorded = recorded  # HTTP response codes the handler emitted
         self.token_req = token_req  # the code-exchange Request, or None
         self.stdout = stdout
         self.exit_code = exit_code  # None on success, else the sys.exit code
+        self.bound = bound or []  # (host, port) tuples the server bound to
 
 
 def _run_setup(
@@ -395,6 +404,7 @@ def _run_setup(
 ):
     saved = {}
     recorded = []
+    bound = []
     box = {"token_req": None}
 
     class _Path:
@@ -428,7 +438,7 @@ def _run_setup(
         patch.object(auth, "_save_json", fake_save),
         patch.object(auth, "_load_json", fake_load),
         patch.object(auth, "webbrowser"),
-        patch.object(auth, "HTTPServer", _server_factory(callback_path, recorded)),
+        patch.object(auth, "HTTPServer", _server_factory(callback_path, recorded, bound)),
         patch("urllib.request.urlopen", fake_urlopen),
         patch("builtins.input", side_effect=inputs),
         patch.object(sys, "stdout", out),
@@ -439,7 +449,7 @@ def _run_setup(
         except SystemExit as e:
             exit_code = e.code
 
-    result = _SetupResult(saved, recorded, box["token_req"], out.getvalue(), exit_code)
+    result = _SetupResult(saved, recorded, box["token_req"], out.getvalue(), exit_code, bound)
     return result, client_path, tokens_path
 
 
@@ -675,6 +685,58 @@ class TestExistingFilesAreTightened(unittest.TestCase):
             auth._save_json(path, {"padding": "x" * 500, "v": 1})
             auth._save_json(path, {"v": 2})
             self.assertEqual(json.loads(path.read_text()), {"v": 2})
+
+
+class TestWhereTheCallbackServerBinds(unittest.TestCase):
+    """The bind address decides whether a container's callback can arrive.
+
+    Bound to loopback, a published container port is refused and `setup_auth`
+    waits for a callback that cannot be delivered - with no timeout, so it
+    hangs rather than failing. None of the other setup_auth tests observe the
+    address, so without these a one-line revert restores that silently.
+
+    The first two tests look redundant and are not: the first catches a bind
+    hardcoded to `0.0.0.0`, which the patched test cannot see, and the second
+    catches one hardcoded to `localhost`, which the first cannot. Deleting
+    either leaves a hardcoded bind alive in that direction.
+    """
+
+    def test_it_binds_the_configured_interface(self):
+        result, _, _ = _run_setup(
+            client_exists=False,
+            inputs=["cid", "csec"],
+            callback_path="/callback?code=AC&state=20260310120000",
+            token_response={"access_token": "at", "refresh_token": "rt", "expires_in": 21600},
+        )
+        self.assertEqual(result.bound, [(auth.MONZO_CALLBACK_HOST, auth.MONZO_CALLBACK_PORT)])
+
+    def test_a_widened_interface_reaches_the_bind(self):
+        # The constant is only worth having if setup_auth reads it rather than
+        # a literal, so drive the whole flow with it patched.
+        with patch.object(auth, "MONZO_CALLBACK_HOST", "0.0.0.0"):
+            result, _, _ = _run_setup(
+                client_exists=False,
+                inputs=["cid", "csec"],
+                callback_path="/callback?code=AC&state=20260310120000",
+                token_response={"access_token": "at", "refresh_token": "rt", "expires_in": 21600},
+            )
+        self.assertEqual(result.bound, [("0.0.0.0", auth.MONZO_CALLBACK_PORT)])
+
+    def test_the_redirect_uri_stays_loopback_whatever_the_bind(self):
+        # The redirect URI is registered with Monzo and resolved by the browser
+        # on the host. Making it "consistent" with the bind sends
+        # redirect_uri=http://0.0.0.0:6600/callback, which Monzo rejects.
+        with patch.object(auth, "MONZO_CALLBACK_HOST", "0.0.0.0"):
+            result, _, _ = _run_setup(
+                client_exists=False,
+                inputs=["cid", "csec"],
+                callback_path="/callback?code=AC&state=20260310120000",
+                token_response={"access_token": "at", "refresh_token": "rt", "expires_in": 21600},
+            )
+        expected = f"http://localhost:{auth.MONZO_CALLBACK_PORT}/callback"
+        self.assertIn(f"redirect_uri={quote(expected, safe='')}", result.token_req.data.decode())
+        self.assertIn(expected, result.stdout)
+        self.assertNotIn("0.0.0.0", result.stdout)
 
 
 if __name__ == "__main__":

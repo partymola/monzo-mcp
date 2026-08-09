@@ -1,0 +1,18 @@
+# The build context is uploaded to the daemon whole. Neither of these is COPYed
+# into the image, but both hold real data on a maintainer's checkout.
+config/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.bak
+*.backup
+
+# These need the ** prefix: a bare pattern matches only at the context root,
+# and src/ holds both of them on a maintainer's checkout.
+.git/
+.venv/
+**/__pycache__/
+**/*.egg-info/
+.pytest_cache/
+.ruff_cache/

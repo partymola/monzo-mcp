@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-08-09
+
+### Fixed
+
+- The container image keeps credentials and the transaction cache on a mountable volume. Both paths default to a location relative to the installed package, which inside the image is the interpreter's lib directory beside `site-packages` - not somewhere a user can mount, and gone when the container is replaced. A user running the published image got "not configured" from every tool, and anything they did authorise did not survive a restart. The image now sets `MONZO_MCP_CONFIG_DIR` and `MONZO_MCP_DB_PATH` under `/data` and declares it as a volume. Installs from source are unaffected: the defaults are unchanged, and only the image sets these variables.
+- `monzo-mcp auth` can complete inside a container. The callback server bound to `localhost`, which refuses connections arriving on the container's bridge interface - where a published port delivers them. Authorising in a container therefore waited for a callback that could never arrive, and waited indefinitely, so the one route to getting credentials onto the volume did not work. The interface is now `MONZO_MCP_CALLBACK_HOST`, still `localhost` everywhere except the image, which sets `0.0.0.0`. The redirect URI is unchanged.
+- The registry entry declares the volume the image needs, so a client configuring this server from the MCP registry is told to mount one rather than finding out from empty results.
+
+### Documentation
+
+- The README documents the container: where images are published, that tags carry a `v` prefix, that an OAuth client must be registered first, how to authorise into a named volume, and how to register the server against that same volume. It notes that no browser opens inside a container, that the callback port should be published on `127.0.0.1` rather than every interface, and that a bind mount leaves root-owned files unless `--user` is passed.
+- Running `auth` with nothing mounted at `/data` is called out. Because the image declares `/data` a volume, an unmounted run writes to an anonymous volume: with `--rm` it is discarded on exit, and without `--rm` a live refresh token is left behind in a volume nothing tracks.
+
 ## [0.6.0] - 2026-08-09
 
 ### Fixed
@@ -87,7 +100,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Transaction search across merchant name, description, and notes.
 - Pre-commit hook (`scripts/check-no-data.sh`) blocking commit of databases, tokens, and other secrets.
 
-[Unreleased]: https://github.com/partymola/monzo-mcp/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/partymola/monzo-mcp/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/partymola/monzo-mcp/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/partymola/monzo-mcp/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/partymola/monzo-mcp/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/partymola/monzo-mcp/compare/v0.4.0...v0.5.0

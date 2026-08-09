@@ -30,7 +30,7 @@ The `scripts/check-no-data.sh` pre-commit hook enforces most of this - install i
 - **DB**: `db.py` - SQLite schema, `get_db()`, `migrate()` (ALTER TABLE for columns added after a DB was created), balance/sync helpers
 - **Tools**: `tools/account_tools.py`, `tools/transaction_tools.py`, `tools/analysis_tools.py`
 - **Helpers**: `helpers.py` - `require_auth` (auth-gate decorator wrapping every tool), `format_response`, `pence_to_pounds`, `validate_account_type`
-- **Config**: env vars `MONZO_MCP_CONFIG_DIR`, `MONZO_MCP_DB_PATH`, falling back to package-relative paths
+- **Config**: env vars `MONZO_MCP_CONFIG_DIR`, `MONZO_MCP_DB_PATH`, falling back to package-relative paths; `MONZO_MCP_CALLBACK_HOST` selects the interface the `auth` callback binds to, defaulting to `localhost`
 
 ## Database schema
 
@@ -48,6 +48,20 @@ SQLite at `monzo.db` (gitignored). Amounts stored in pence (integers), converted
 - All tools are `async def` with `@mcp.tool()` + `@require_auth`; sync HTTP calls are wrapped in `anyio.to_thread.run_sync()` to avoid blocking
 - **Comparison**: `monzo_spending`'s `vs_previous` applies the same `category` and `account_type` filters as the month it is comparing. A filtered month against an unfiltered one reports the difference between two different questions as a percentage change. Pinned by `test_vs_previous_applies_the_same_filters_as_the_month_it_compares` and `test_vs_previous_applies_a_category_filter_too` in `tests/test_spending_tool.py`
 - Cache-reading tools call `auto_sync_if_stale()` before querying - an incremental sync if not synced today **in UTC**. Both sides of that comparison must be UTC: `log_sync` stores a UTC timestamp, so never compare it against a local date - that reopens the retry storm east of Greenwich, and a "today" earlier than the UTC date suppresses syncing west of it. Pinned by `test_a_local_date_ahead_of_utc_does_not_defeat_the_throttle` and `test_a_local_evening_west_of_greenwich_counts_towards_the_next_utc_day` in `tests/test_transactions.py`
+
+## Seams the suite does not cross
+
+A claim sits at a seam when no input to the program can make its test fail. Behavioural tests answer "given this input, what happens"; these are about packaging and deployment, so check them by execution when they change.
+
+- **The container's storage and callback contract.** Four places have to agree and each is free to drift alone: the Dockerfile's `ENV`, the `VOLUME` it sits under, the `-v` runtime argument in `server.json`, and the commands in the README. `tests/test_packaging.py` pins all four by reading the sources. Two parser rules there are load-bearing - only instructions after the **final** `FROM` count, because an `ENV` in an earlier stage does not ship; and both `ENV k=v` and the legacy `ENV k v` forms must be read, or a later space-form line silently overrides the path.
+- **What it cannot see:** that the running process actually *receives* that environment. An `ENTRYPOINT` scrubbing it would pass. Build the image and probe it.
+- **The callback bind.** `auth`'s listener must accept the interface a published port arrives on. Bound to `localhost` it refuses the container's bridge address, so `auth` waits for a callback that cannot be delivered - indefinitely, with no error, because `handle_request()` has no timeout. The default stays `localhost` for source installs; only the image widens it, and only because the README publishes the port on `127.0.0.1`. Three things are pinned separately and all three are needed: `TestWhereTheCallbackServerBinds` in `tests/test_auth.py` asserts the address `setup_auth` actually binds and that the redirect URI stays loopback regardless of it; `test_callback_host_override` in `tests/test_config.py` pins the environment variable's name, which is what connects the image to the code; and `TestTheCallbackCanReachTheContainer` in `tests/test_packaging.py` pins the Dockerfile and README ends. **Pinning only the declarations leaves the bind itself free** - the address is otherwise unobservable, since nothing the handler does afterwards reveals it.
+- **The pre-commit guard.** `scripts/check-no-data.sh` is not exercised by pytest. Stage a probe file per class and check reject against expectation.
+
+**Two known defects in `setup_auth`, both pre-existing and both affecting source installs identically.** Recorded here so the next person does not rediscover them from a hang:
+
+- **The OAuth `state` is generated and never checked.** `do_GET` reads only `code`, so a racing callback can plant an attacker's authorization code and the token file ends up holding their account. Roughly four lines in `do_GET`, and testable with the existing fixtures - drive `_run_setup` with `callback_path="/callback?code=AC&state=wrong"` and assert no token is saved. Do this one first; it is cheaper than the next.
+- **One stray connection to the callback port breaks `auth`.** `handle_request()` is called once and `BaseHTTPRequestHandler.timeout` is `None`, so a connection that opens and sends nothing blocks forever, and one that opens and closes consumes the single request and exits with "no auth code received" while the real callback waits in the backlog. The fix is `server.timeout`, a `while not auth_code` loop and a handler timeout - it changes control flow and needs a real socket to test, which the synthetic `_FakeServer` cannot provide.
 
 ## Running tests
 

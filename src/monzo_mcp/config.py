@@ -25,3 +25,10 @@ MONZO_API_BASE = "https://api.monzo.com"
 MONZO_AUTH_URL = "https://auth.monzo.com/"
 MONZO_TOKEN_URL = "https://api.monzo.com/oauth2/token"
 MONZO_CALLBACK_PORT = 6600
+
+# Interface the OAuth callback server binds to. The redirect URI stays
+# http://localhost:<port>/callback regardless - this is only what the listener
+# accepts on. A published container port arrives on the container's bridge
+# interface, which a localhost-bound listener refuses, so the image overrides
+# this to 0.0.0.0.
+MONZO_CALLBACK_HOST = os.environ.get("MONZO_MCP_CALLBACK_HOST", "localhost")

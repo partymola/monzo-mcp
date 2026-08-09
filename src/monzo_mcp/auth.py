@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 from .config import (
     CONFIG_DIR,
     MONZO_AUTH_URL,
+    MONZO_CALLBACK_HOST,
     MONZO_CALLBACK_PORT,
     MONZO_CLIENT_PATH,
     MONZO_TOKEN_URL,
@@ -252,7 +253,7 @@ def setup_auth():
     print(f"URL: {auth_url}\n")
     webbrowser.open(auth_url)
 
-    server = HTTPServer(("localhost", MONZO_CALLBACK_PORT), CallbackHandler)
+    server = HTTPServer((MONZO_CALLBACK_HOST, MONZO_CALLBACK_PORT), CallbackHandler)
     print("Waiting for callback... (approve in Monzo app)")
     server.handle_request()
 

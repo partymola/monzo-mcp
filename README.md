@@ -46,6 +46,8 @@ uv venv --python 3.13 .venv
 uv pip install -e .
 ```
 
+This package is not on PyPI - the name belongs to an unrelated project. A container image is published instead; see [Docker](#docker).
+
 ## Setup
 
 ### 1. Register a Monzo OAuth client
@@ -72,6 +74,50 @@ claude mcp add -s user monzo -- /path/to/monzo-mcp/.venv/bin/monzo-mcp
 
 In Claude Code, run `monzo_sync` to populate the local transaction cache. Do this immediately after auth to take advantage of the SCA window (up to 11 months of history).
 
+## Docker
+
+Images are published to `ghcr.io/partymola/monzo-mcp`. Tags carry a `v` prefix (`:vX.Y.Z`), and `:latest` follows the most recent release.
+
+**The container needs a volume.** Credentials and the transaction cache live under `/data`; with nothing mounted there, the container still starts and every tool reports that it is not configured, and anything you authorise is lost as soon as the container is replaced.
+
+First register an OAuth client as described in [Setup step 1](#1-register-a-monzo-oauth-client) - `auth` prompts for the Client ID and secret, and there is no way to supply them later. The redirect URL is `http://localhost:6600/callback`, the same as a source install.
+
+Authenticate once, into a named volume. Decide before you run this whether you want a bind mount instead - switching afterwards means authorising again:
+
+```bash
+docker volume create monzo-mcp-data
+docker run --rm -it \
+  -v monzo-mcp-data:/data \
+  -p 127.0.0.1:6600:6600 \
+  ghcr.io/partymola/monzo-mcp:latest auth
+```
+
+The published port is needed only for this step, so the OAuth redirect can reach the container. Binding it to `127.0.0.1` keeps the callback listener off your network. **No browser opens** - the container has none - so copy the URL it prints. Then approve the login in your Monzo app within 5 minutes (see [Monzo SCA window](#monzo-sca-window)).
+
+Then register the server, reusing the same volume:
+
+```bash
+claude mcp add -s user monzo -- \
+  docker run --rm -i -v monzo-mcp-data:/data ghcr.io/partymola/monzo-mcp:latest
+```
+
+`-i` is required - the server speaks JSON-RPC over stdin and stdout.
+
+**Sync straight away.** The 11-month backfill closes 5 minutes after you approve in the Monzo app (see [Monzo SCA window](#monzo-sca-window)), and this route is longer than a source install - so call `monzo_sync` as soon as the server is registered. Miss it and you silently get 90 days instead, with no error.
+
+To keep the files somewhere you can read them, use a bind mount instead of a named volume. The container runs as root and writes credentials owner-only, so without `--user` they end up root-owned:
+
+```bash
+mkdir -p ~/monzo-mcp-data/config
+docker run --rm -it \
+  -v ~/monzo-mcp-data:/data \
+  --user $(id -u):$(id -g) \
+  -p 127.0.0.1:6600:6600 \
+  ghcr.io/partymola/monzo-mcp:latest auth
+```
+
+Pass the same `-v` and `--user` to the server command. Create the directory first - `--user` against a named volume fails, because the volume initialises root-owned from the image.
+
 ## CLI
 
 ```
@@ -88,6 +134,9 @@ All configuration is via environment variables (optional):
 |----------|---------|-------------|
 | `MONZO_MCP_CONFIG_DIR` | `<package>/config/` | Directory for OAuth credentials and tokens |
 | `MONZO_MCP_DB_PATH` | `<package>/monzo.db` | Path to SQLite transaction cache |
+| `MONZO_MCP_CALLBACK_HOST` | `localhost` | Interface the `auth` callback server binds to. The redirect URI is unaffected |
+
+The container image sets the first two under `/data`, because the package-relative defaults resolve into the interpreter's lib directory there, which cannot be mounted. It sets the third to `0.0.0.0`, because a published port arrives on the container's bridge interface and a `localhost` bind refuses it.
 
 Credential files (created by `monzo-mcp auth`):
 - `config/monzo_client.json` - OAuth client ID and secret
@@ -117,6 +166,8 @@ Older cached transactions gain fields added in newer versions (e.g. counterparty
 - **"SCA required" or only 90 days of history** - re-run `monzo-mcp auth` and approve the login in the Monzo app within 5 minutes, then sync straight away (see the SCA window above).
 - **Token expired / no refresh** - re-run `monzo-mcp auth` to re-authorise.
 - **"No transaction data available"** - the cache is empty; call `monzo_sync` (or any cache-reading tool, which auto-syncs) once after authenticating.
+- **Every tool reports "not configured" under Docker, or authentication does not survive a restart** - nothing is mounted at `/data`. See [Docker](#docker); the same volume must be passed to the `auth` run and to the server.
+- **`auth` sits on "Waiting for callback..." after you approve** - the callback was not delivered. Press Ctrl-C and run it again. Under Docker, check the port is published (`-p 127.0.0.1:6600:6600`).
 
 ## Contributing
 

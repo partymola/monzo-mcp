@@ -38,6 +38,17 @@ class TestConfigOverrides(unittest.TestCase):
         cfg = _reload_with_env({"MONZO_MCP_DB_PATH": "/custom/data/monzo.db"})
         self.assertEqual(cfg.DB_PATH, Path("/custom/data/monzo.db"))
 
+    def test_callback_host_override(self):
+        # The container image sets exactly this name. Renaming it on either
+        # side leaves the image binding localhost, where a published port
+        # cannot reach it - and both halves still look correct in isolation.
+        cfg = _reload_with_env({"MONZO_MCP_CALLBACK_HOST": "0.0.0.0"})
+        self.assertEqual(cfg.MONZO_CALLBACK_HOST, "0.0.0.0")
+
+    def test_callback_host_defaults_to_loopback(self):
+        cfg = _reload_with_env({})
+        self.assertEqual(cfg.MONZO_CALLBACK_HOST, "localhost")
+
     def test_overrides_are_independent(self):
         # Overriding the DB path must not move CONFIG_DIR off its package default.
         cfg = _reload_with_env({"MONZO_MCP_DB_PATH": "/only/db.sqlite"})

@@ -13,7 +13,23 @@
       "identifier": "ghcr.io/partymola/monzo-mcp:v0.2.1",
       "transport": {
         "type": "stdio"
-      }
+      },
+      "runtimeHint": "docker",
+      "runtimeArguments": [
+        {
+          "type": "named",
+          "name": "-v",
+          "value": "{data_volume}:/data",
+          "isRequired": true,
+          "variables": {
+            "data_volume": {
+              "description": "Docker volume or host directory holding the OAuth credentials and the transaction cache. Without it the container starts but every tool reports that it is not configured, and anything authorised is lost when the container is replaced.",
+              "default": "monzo-mcp-data",
+              "isRequired": true
+            }
+          }
+        }
+      ]
     }
   ]
 }
