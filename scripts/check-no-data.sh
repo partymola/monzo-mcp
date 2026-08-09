@@ -24,9 +24,14 @@ if [ -n "$matched" ]; then
     errors=1
 fi
 
-# Check for config secrets (example files are safe to commit)
-if git diff --cached --name-only | grep -E '^config/.*\.(json|env)$' | grep -qvE '\.example\.'; then
-    echo "ERROR: Staged file in config/ - credentials and tokens must not be committed"
+# Check for config secrets. Everything under config/ is rejected except the
+# .gitkeep and example files, rather than listing extensions to reject: the
+# credential files across these servers include extensionless dotfiles
+# (.env, .token-oauth, .token-v2), which an extension pattern misses entirely.
+staged_config=$(git diff --cached --name-only | grep -E '^config/' | grep -vE '(^|/)\.gitkeep$|\.example(\.|$)' || true)
+if [ -n "$staged_config" ]; then
+    echo "ERROR: Staged file(s) under config/ - credentials and tokens must not be committed:"
+    echo "$staged_config" | sed 's/^/  /'
     errors=1
 fi
 
