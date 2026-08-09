@@ -1,7 +1,9 @@
 """Monzo OAuth setup and token management."""
 
+import http.client
 import json
 import logging
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -53,8 +55,26 @@ _cached_creds = None
 
 
 def _save_json(path, data):
+    """Write a credential file at owner-only permissions from the outset.
+
+    The mode is set by os.open at creation rather than by a chmod afterwards:
+    a chmod leaves a window in which the token sits in a world-readable file,
+    and no chmod at all leaves it there permanently.
+
+    The mode applies on POSIX. Windows ignores it and governs access by
+    inherited ACLs, so this narrows nothing there - it is not a claim about
+    every platform.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2))
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # The mode above applies only when the file is created, so a file that
+    # already exists keeps whatever it had - 0644 on installs that predate
+    # this. fchmod on the open descriptor narrows it with no window in which
+    # the token is readable.
+    if hasattr(os, "fchmod"):
+        os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        handle.write(json.dumps(data, indent=2))
 
 
 def _load_json(path):
@@ -250,9 +270,24 @@ def setup_auth():
     req = urllib.request.Request(MONZO_TOKEN_URL, data=token_data, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            tokens = json.loads(resp.read().decode())
-    except urllib.error.URLError as e:
+            raw = resp.read()
+    except (OSError, http.client.HTTPException) as e:
+        # Same widening as the refresh path: urlopen wraps only connect-phase
+        # failures, so a read timeout arrives bare and a truncated response
+        # raises from http.client, which is not an OSError at all.
         print(f"Error exchanging code: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        tokens = json.loads(raw)
+    except ValueError:
+        print("Error exchanging code: the response was not readable.", file=sys.stderr)
+        sys.exit(1)
+
+    if not isinstance(tokens, dict) or not tokens.get("access_token"):
+        # Checked before indexing: the auth code is single-use, so a raw
+        # traceback here costs the user the whole browser flow again.
+        print("Error exchanging code: no token in the response.", file=sys.stderr)
         sys.exit(1)
 
     token_store = {

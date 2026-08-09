@@ -1,5 +1,6 @@
 """Monzo API client with automatic token refresh."""
 
+import http.client
 import json
 import logging
 import urllib.error
@@ -49,12 +50,31 @@ def get(path: str) -> dict:
     )
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read().decode())
+            raw = resp.read()
     except urllib.error.HTTPError as e:
         if e.code == 401:
             raise MonzoAuthError("Access token invalid. Run: monzo-mcp auth") from e
         if e.code == 403:
             raise MonzoSCAError("SCA required - approve in Monzo app") from e
         raise MonzoAPIError(f"Monzo API error {e.code}") from e
-    except urllib.error.URLError as e:
-        raise MonzoAPIError(f"Network error: {e}") from e
+    except (OSError, http.client.HTTPException) as e:
+        # Wider than URLError, for the reason auth.py already documents:
+        # urlopen wraps only connect-phase failures in it, so a read timeout
+        # or a reset connection arrives bare, and a truncated response raises
+        # from http.client, which is not an OSError at all.
+        raise MonzoAPIError("Network error. Check your connection.") from e
+
+    # Parsing is its own failure cause, not a transport one, and it is left to
+    # json.loads on the raw bytes so an undecodable body and one that is not
+    # JSON land in the same place: both raise ValueError, which none of the
+    # handlers above catch. Either used to escape the sync loop, whose handlers
+    # are for the Monzo types, leaving no record that syncing had stopped.
+    try:
+        body = json.loads(raw)
+    except ValueError as e:
+        raise MonzoAPIError("Monzo returned an unreadable response.") from e
+
+    if not isinstance(body, dict):
+        raise MonzoAPIError("Monzo returned an unexpected response shape.")
+
+    return body

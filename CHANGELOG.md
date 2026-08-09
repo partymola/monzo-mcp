@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- On POSIX, credential files are created with owner-only permissions, and existing ones are tightened when rewritten on a best-effort basis - tightening needs ownership the writer may not have, and the file has already been emptied for rewriting by that point, so a permissions failure must not take the token with it. They were written with no mode set at all, so they took whatever the umask gave them - world-readable on a default umask, permanently, for a file holding a refresh token. Windows ignores the mode and governs access by inherited ACLs, so nothing changes there. A file created by an earlier version is narrowed the next time a token is saved; to check now, `ls -l config/`.
+- A data request that gets an unreadable answer is reported rather than escaping. A proxy or captive portal replying to an API call with HTML, with a body that will not decode, or with JSON that is not an object, raised past every handler in `api.get` and past the sync loop, which catches only the Monzo types. A read timeout or a truncated response did the same: `urlopen` wraps only connect-phase failures, so those arrive unwrapped. A sync that ends with a transaction error is now logged with status `error` rather than `ok`, so the next auto-sync is not suppressed for the rest of the day, and only a genuine SCA refusal produces the "approve in Monzo app" note - an unreadable response used to produce it too. The account lookup that opens a sync remains outside the loop's handlers. Reading and parsing are now separate steps.
+
 ## [0.5.1] - 2026-08-09
 
 ### Fixed

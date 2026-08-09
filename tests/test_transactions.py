@@ -5,12 +5,14 @@ client is mocked and the cache is in-memory SQLite, so no credentials or network
 are needed. Expected values are hand-derived from the fixtures.
 """
 
+import pathlib
 import sqlite3
+import tempfile
 import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
-from monzo_mcp.api import MonzoSCAError
+from monzo_mcp.api import MonzoAPIError, MonzoSCAError
 from monzo_mcp.db import SCHEMA
 from monzo_mcp.tools import transaction_tools
 
@@ -362,3 +364,82 @@ class TestAccountSelection(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAnUnreadableResponseIsNotAnSCAPrompt(unittest.TestCase):
+    """Only an SCA refusal earns the SCA note, and a failed sync is not "ok".
+
+    Telling the user to approve something in the Monzo app is the wrong answer
+    to a dropped connection, and logging the run as ok suppresses the retry
+    for the rest of the day via get_last_sync_time.
+    """
+
+    def _run_with_transactions_failing(self, exc):
+        self._tmp = tempfile.TemporaryDirectory()
+        db_path = pathlib.Path(self._tmp.name) / "monzo.db"
+        db_conn = sqlite3.connect(db_path)
+        db_conn.row_factory = sqlite3.Row
+        db_conn.executescript(SCHEMA)
+
+        def fake_get(path):
+            if path == "/accounts":
+                return {"accounts": [{"id": "acc_1", "type": "uk_retail", "closed": False}]}
+            if path.startswith("/balance") or path.startswith("/pots"):
+                return {"balance": 0, "currency": "GBP", "pots": []}
+            raise exc
+
+        with (
+            patch.object(transaction_tools, "get_db", return_value=db_conn),
+            patch.object(transaction_tools.api, "get", side_effect=fake_get),
+        ):
+            result = transaction_tools.run_sync()
+
+        reopened = sqlite3.connect(db_path)
+        rows = reopened.execute("SELECT status FROM sync_log").fetchall()
+        reopened.close()
+        self._tmp.cleanup()
+        return result, [r[0] for r in rows]
+
+    def test_an_api_error_is_not_reported_as_sca(self):
+        result, _ = self._run_with_transactions_failing(
+            MonzoAPIError("Monzo returned an unreadable response.")
+        )
+        detail = result["details"][0]
+        assert "sca_note" not in detail
+        assert "transactions_error" in detail
+
+    def test_an_sca_error_is_still_reported_as_sca(self):
+        result, _ = self._run_with_transactions_failing(MonzoSCAError("SCA"))
+        assert "SCA" in result["details"][0]["sca_note"]
+
+    def test_a_failed_sync_is_not_logged_as_ok(self):
+        _, statuses = self._run_with_transactions_failing(
+            MonzoAPIError("Monzo returned an unreadable response.")
+        )
+        assert statuses == ["error"]
+
+    def test_a_clean_sync_is_still_logged_as_ok(self):
+        tmp = tempfile.TemporaryDirectory()
+        db_path = pathlib.Path(tmp.name) / "monzo.db"
+        db_conn = sqlite3.connect(db_path)
+        db_conn.row_factory = sqlite3.Row
+        db_conn.executescript(SCHEMA)
+
+        def fake_get(path):
+            if path == "/accounts":
+                return {"accounts": [{"id": "acc_1", "type": "uk_retail", "closed": False}]}
+            if path.startswith("/transactions"):
+                return {"transactions": []}
+            return {"balance": 0, "currency": "GBP", "pots": []}
+
+        with (
+            patch.object(transaction_tools, "get_db", return_value=db_conn),
+            patch.object(transaction_tools.api, "get", side_effect=fake_get),
+        ):
+            transaction_tools.run_sync()
+
+        reopened = sqlite3.connect(db_path)
+        rows = reopened.execute("SELECT status FROM sync_log").fetchall()
+        reopened.close()
+        tmp.cleanup()
+        assert [r[0] for r in rows] == ["ok"]

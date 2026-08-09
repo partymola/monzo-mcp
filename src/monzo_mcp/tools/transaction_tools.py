@@ -153,8 +153,15 @@ def run_sync(account_type: str | None = None, since: str | None = None) -> dict:
                             ).get("transactions", [])
                             if not last_sync:
                                 detail["sca_note"] = "SCA window expired, fetched last 90 days only"
-                        except (MonzoSCAError, MonzoAPIError):
+                        except MonzoSCAError:
                             detail["sca_note"] = "SCA required - approve in Monzo app"
+                            break
+                        except MonzoAPIError as e:
+                            # Only an SCA refusal earns the SCA note. Telling
+                            # the user to approve something in the app is the
+                            # wrong answer to a dropped connection or an
+                            # unreadable response, and it hides the real cause.
+                            detail["transactions_error"] = str(e)
                             break
                     else:
                         break
@@ -234,7 +241,14 @@ def run_sync(account_type: str | None = None, since: str | None = None) -> dict:
         if dupes:
             db.commit()
 
-        log_sync(db, "ok", total_added, f"accounts={accounts_synced}, dupes_removed={dupes}")
+        failed = [d for d in sync_details if d.get("transactions_error")]
+        status = "error" if failed else "ok"
+        log_sync(
+            db,
+            status,
+            total_added,
+            f"accounts={accounts_synced}, dupes_removed={dupes}",
+        )
 
         return {
             "accounts_synced": accounts_synced,

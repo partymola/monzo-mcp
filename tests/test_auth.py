@@ -8,6 +8,7 @@ the stored expiry timestamps are exact, not approximate.
 
 import io
 import json
+import os
 import pathlib
 import sys
 import tempfile
@@ -588,3 +589,71 @@ class TestCredentialFilesAreRefusals(unittest.TestCase):
     def test_a_token_file_of_the_wrong_shape_is_a_refusal(self):
         with self.assertRaises(auth.TokenRefused):
             self._refresh_with_files(tokens='["not", "an", "object"]')
+
+
+@unittest.skipIf(sys.platform == "win32", "POSIX mode bits; Windows uses ACLs")
+class TestCredentialFilesAreOwnerOnly(unittest.TestCase):
+    """A token file must never be readable by other local users.
+
+    This one had no chmod at all, so the file kept whatever the umask gave it -
+    0644 on a default umask, permanently, for a file holding a refresh token.
+
+    POSIX only: on Windows the mode passed to os.open is ignored and access is
+    governed by inherited ACLs, so the assertion below would fail there for a
+    reason that says nothing about this code.
+    """
+
+    def test_a_new_token_file_is_created_owner_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = pathlib.Path(tmp) / "monzo_tokens.json"
+            auth._save_json(target, {"refresh_token": "fictional"})
+            self.assertEqual(oct(target.stat().st_mode & 0o777), "0o600")
+
+    def test_rewriting_does_not_loosen_an_existing_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = pathlib.Path(tmp) / "monzo_tokens.json"
+            auth._save_json(target, {"refresh_token": "first"})
+            auth._save_json(target, {"refresh_token": "second"})
+            self.assertEqual(oct(target.stat().st_mode & 0o777), "0o600")
+            self.assertEqual(json.loads(target.read_text())["refresh_token"], "second")
+
+
+@unittest.skipIf(sys.platform == "win32", "POSIX mode bits; Windows uses ACLs")
+class TestExistingFilesAreTightened(unittest.TestCase):
+    def test_an_existing_loose_token_file_is_tightened(self):
+        """O_CREAT's mode applies only at creation, so upgrades kept 0644."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "monzo_tokens.json"
+            path.write_text("{}")
+            os.chmod(path, 0o644)
+            auth._save_json(path, {"refresh_token": "fictional"})
+            self.assertEqual(oct(path.stat().st_mode & 0o777), "0o600")
+
+    def test_the_mode_is_set_when_the_file_is_opened(self):
+        """Pins the docstring's reason, not just its outcome.
+
+        A chmod after the write produces the same final mode while leaving the
+        token briefly readable, so asserting the result alone cannot tell the
+        two apart.
+        """
+        seen = {}
+        real_open = os.open
+
+        def spy(path, flags, mode=0o777, **kwargs):
+            seen["mode"] = mode
+            return real_open(path, flags, mode, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "monzo_tokens.json"
+            with patch.object(auth.os, "open", spy):
+                auth._save_json(path, {"refresh_token": "fictional"})
+
+        self.assertEqual(oct(seen["mode"]), "0o600")
+
+    def test_a_shorter_rewrite_leaves_no_tail(self):
+        """Equal-length payloads cannot catch a missing O_TRUNC."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "monzo_tokens.json"
+            auth._save_json(path, {"padding": "x" * 500, "v": 1})
+            auth._save_json(path, {"v": 2})
+            self.assertEqual(json.loads(path.read_text()), {"v": 2})

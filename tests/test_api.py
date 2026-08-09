@@ -11,7 +11,7 @@ import io
 import json
 import unittest
 import urllib.error
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from monzo_mcp import api, auth
 from monzo_mcp.api import MonzoAPIError, MonzoAuthError, MonzoSCAError
@@ -249,6 +249,71 @@ class TestTheRefreshBoundary(unittest.TestCase):
     def test_the_boundary_does_not_swallow_a_successful_refresh(self):
         with patch.object(auth, "_refresh_token", return_value="a-token"):
             self.assertEqual(auth.refresh_token(), "a-token")
+
+
+class TestTheDataRequestParses(unittest.TestCase):
+    """The data request reads and parses, each with its own failures.
+
+    Earlier rounds enumerated exception types arriving at the refresh
+    boundary, so this site was never in scope: a proxy answering an API call
+    with HTML raised ValueError past every handler and escaped the sync loop,
+    which catches only the Monzo types.
+    """
+
+    def _get_returning(self, payload):
+        response = MagicMock()
+        response.read.return_value = payload
+        response.__enter__ = lambda s: s
+        response.__exit__ = lambda *a: None
+        with (
+            patch.object(api, "refresh_token", return_value="token"),
+            patch.object(api.urllib.request, "urlopen", return_value=response),
+        ):
+            return api.get("/accounts")
+
+    def test_a_body_that_is_not_json_is_reported(self):
+        with self.assertRaises(MonzoAPIError):
+            self._get_returning(b"<html>captive portal</html>")
+
+    def test_an_undecodable_body_is_reported(self):
+        with self.assertRaises(MonzoAPIError):
+            self._get_returning(b"\xff\xfe\x00 not utf-8")
+
+    def test_a_body_of_the_wrong_shape_is_reported(self):
+        with self.assertRaises(MonzoAPIError):
+            self._get_returning(b'["not", "an", "object"]')
+
+    def test_none_of_them_is_reported_as_an_auth_failure(self):
+        for payload in (b"<html>x</html>", b"\xff\xfe", b'["a"]'):
+            with self.subTest(payload=payload[:6]):
+                with self.assertRaises(MonzoAPIError) as caught:
+                    self._get_returning(payload)
+                self.assertNotIsInstance(caught.exception, MonzoAuthError)
+
+    def test_a_valid_body_still_parses(self):
+        self.assertEqual(self._get_returning(b'{"ok": 1}'), {"ok": 1})
+
+    def test_a_read_timeout_is_reported_not_escaped(self):
+        """urlopen wraps only connect-phase failures, so this arrives bare."""
+        with (
+            patch.object(api, "refresh_token", return_value="token"),
+            patch.object(api.urllib.request, "urlopen", side_effect=TimeoutError("timed out")),
+        ):
+            with self.assertRaises(MonzoAPIError):
+                api.get("/accounts")
+
+    def test_a_truncated_response_is_reported_not_escaped(self):
+        """http.client exceptions are not OSError, so they escaped every tuple."""
+        import http.client
+
+        with (
+            patch.object(api, "refresh_token", return_value="token"),
+            patch.object(
+                api.urllib.request, "urlopen", side_effect=http.client.BadStatusLine("garbage")
+            ),
+        ):
+            with self.assertRaises(MonzoAPIError):
+                api.get("/accounts")
 
 
 if __name__ == "__main__":
