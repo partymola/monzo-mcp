@@ -544,10 +544,6 @@ class TestSetupAuth(unittest.TestCase):
         self.assertNotIn(tokens_path, result.saved)  # nothing persisted on failure
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestCredentialFilesAreRefusals(unittest.TestCase):
     """No usable credential file is a refusal, not a transport failure.
 
@@ -629,6 +625,28 @@ class TestExistingFilesAreTightened(unittest.TestCase):
             auth._save_json(path, {"refresh_token": "fictional"})
             self.assertEqual(oct(path.stat().st_mode & 0o777), "0o600")
 
+    def test_a_failure_to_tighten_does_not_take_the_token_with_it(self):
+        """The tightening is best-effort, and it has to be.
+
+        It needs ownership the writer does not always have - a file arriving
+        under another uid, or a mount whose filesystem refuses fchmod. By the
+        time it runs, O_TRUNC has emptied the file, so aborting the write
+        would trade a readable token for no token at all. On a refresh the
+        server has already rotated the old one, which makes that an outage
+        rather than a permissions problem.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "monzo_tokens.json"
+            path.write_text('{"refresh_token": "old"}')
+
+            def refuse(fd, mode):
+                raise PermissionError(1, "Operation not permitted")
+
+            with patch.object(auth.os, "fchmod", refuse):
+                auth._save_json(path, {"refresh_token": "rotated"})
+
+            self.assertEqual(json.loads(path.read_text())["refresh_token"], "rotated")
+
     def test_the_mode_is_set_when_the_file_is_opened(self):
         """Pins the docstring's reason, not just its outcome.
 
@@ -657,3 +675,7 @@ class TestExistingFilesAreTightened(unittest.TestCase):
             auth._save_json(path, {"padding": "x" * 500, "v": 1})
             auth._save_json(path, {"v": 2})
             self.assertEqual(json.loads(path.read_text()), {"v": 2})
+
+
+if __name__ == "__main__":
+    unittest.main()

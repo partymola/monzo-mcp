@@ -9,10 +9,11 @@ import pathlib
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
-from monzo_mcp.api import MonzoAPIError, MonzoSCAError
+from monzo_mcp.api import MonzoAPIError, MonzoAuthError, MonzoSCAError
 from monzo_mcp.db import SCHEMA
 from monzo_mcp.tools import transaction_tools
 
@@ -362,10 +363,6 @@ class TestAccountSelection(unittest.TestCase):
         self.assertEqual(result["error"], "No Monzo accounts found")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestAnUnreadableResponseIsNotAnSCAPrompt(unittest.TestCase):
     """Only an SCA refusal earns the SCA note, and a failed sync is not "ok".
 
@@ -443,3 +440,131 @@ class TestAnUnreadableResponseIsNotAnSCAPrompt(unittest.TestCase):
         reopened.close()
         tmp.cleanup()
         assert [r[0] for r in rows] == ["ok"]
+
+
+class TestALaterPageFailingIsAlsoAFailure(unittest.TestCase):
+    """Page 0 is not the only page, and a hole in the history is not a success.
+
+    A later page failing used to break out of the loop recording nothing, so
+    the run was logged ok with whatever it had managed to fetch, and the
+    throttle then suppressed the next sync for the rest of the day over a
+    partial cache.
+    """
+
+    def test_a_failure_on_a_later_page_is_recorded(self):
+        tmp = tempfile.TemporaryDirectory()
+        db_path = pathlib.Path(tmp.name) / "monzo.db"
+        db_conn = sqlite3.connect(db_path)
+        db_conn.row_factory = sqlite3.Row
+        db_conn.executescript(SCHEMA)
+
+        calls = {"n": 0}
+        full_page = [
+            _mk(f"tx_{i}", amount=-100, created=f"2026-03-{i % 28 + 1:02d}T10:00:00Z", settled="s")
+            for i in range(100)
+        ]
+
+        def fake_get(path):
+            if path == "/accounts":
+                return {"accounts": [{"id": "acc_1", "type": "uk_retail", "closed": False}]}
+            if path.startswith("/transactions"):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    return {"transactions": full_page}
+                raise MonzoAPIError("Monzo returned an unreadable response.")
+            return {"balance": 0, "currency": "GBP", "pots": []}
+
+        with (
+            patch.object(transaction_tools, "get_db", return_value=db_conn),
+            patch.object(transaction_tools.api, "get", side_effect=fake_get),
+        ):
+            result = transaction_tools.run_sync()
+
+        reopened = sqlite3.connect(db_path)
+        statuses = [r[0] for r in reopened.execute("SELECT status FROM sync_log").fetchall()]
+        reopened.close()
+        tmp.cleanup()
+
+        assert "transactions_error" in result["details"][0]
+        assert statuses == ["error"]
+
+
+class TestTheAutoSyncThrottleCountsAttempts(unittest.TestCase):
+    """The throttle has to count attempts, not successes.
+
+    Gating on the last successful sync means a sync that keeps failing never
+    advances the timestamp that gates it, so every tool call starts a fresh
+    full sync - answering a rate limit or a captive portal by retrying
+    continuously, and writing a sync_log row each time.
+    """
+
+    def _runs_after_a_failure_today(self):
+        tmp = tempfile.TemporaryDirectory()
+        db_path = pathlib.Path(tmp.name) / "monzo.db"
+        db_conn = sqlite3.connect(db_path)
+        db_conn.row_factory = sqlite3.Row
+        db_conn.executescript(SCHEMA)
+        db_conn.execute(
+            "INSERT INTO sync_log (synced_at, status, records_added, notes) VALUES (?, ?, ?, ?)",
+            (datetime.now(timezone.utc).isoformat(), "error", 0, ""),
+        )
+        db_conn.commit()
+
+        ran = {"n": 0}
+        with (
+            patch.object(transaction_tools, "get_db", return_value=db_conn),
+            patch.object(transaction_tools, "run_sync", lambda *a, **k: ran.__setitem__("n", 1)),
+        ):
+            transaction_tools.auto_sync_if_stale()
+        tmp.cleanup()
+        return ran["n"]
+
+    def test_a_failure_today_still_throttles_the_rest_of_the_day(self):
+        assert self._runs_after_a_failure_today() == 0
+
+
+class TestAnUnnamedFailureStillLeavesASyncLogRow(unittest.TestCase):
+    """MonzoAuthError is a sibling of the two types the loop names, not a parent.
+
+    It escaped run_sync leaving sync_log - the only record a run leaves -
+    empty, so nothing showed that syncing had stopped, and the throttle did
+    not count the attempt.
+    """
+
+    def _statuses_after(self, exc):
+        tmp = tempfile.TemporaryDirectory()
+        db_path = pathlib.Path(tmp.name) / "monzo.db"
+        db_conn = sqlite3.connect(db_path)
+        db_conn.row_factory = sqlite3.Row
+        db_conn.executescript(SCHEMA)
+
+        def fake_get(path):
+            if path == "/accounts":
+                return {"accounts": [{"id": "acc_1", "type": "uk_retail", "closed": False}]}
+            raise exc
+
+        with (
+            patch.object(transaction_tools, "get_db", return_value=db_conn),
+            patch.object(transaction_tools.api, "get", side_effect=fake_get),
+        ):
+            with self.assertRaises(type(exc)):
+                transaction_tools.run_sync()
+
+        reopened = sqlite3.connect(db_path)
+        rows = reopened.execute("SELECT status, notes FROM sync_log").fetchall()
+        reopened.close()
+        tmp.cleanup()
+        return rows
+
+    def test_an_auth_failure_is_recorded_and_still_raised(self):
+        rows = self._statuses_after(MonzoAuthError("Could not obtain an access token."))
+        assert rows and rows[0][0] == "error"
+        assert "MonzoAuthError" in rows[0][1]
+
+    def test_the_recorded_note_carries_no_response_content(self):
+        rows = self._statuses_after(MonzoAuthError("/etc/secret/path"))
+        assert "/etc/secret/path" not in rows[0][1]
+
+
+if __name__ == "__main__":
+    unittest.main()

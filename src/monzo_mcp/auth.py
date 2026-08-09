@@ -67,13 +67,13 @@ def _save_json(path, data):
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    # The mode above applies only when the file is created, so a file that
-    # already exists keeps whatever it had - 0644 on installs that predate
-    # this. fchmod on the open descriptor narrows it with no window in which
-    # the token is readable.
-    if hasattr(os, "fchmod"):
-        os.fchmod(fd, 0o600)
     with os.fdopen(fd, "w") as handle:
+        # Best-effort: O_TRUNC has already emptied the file, so a
+        # permissions failure must not take the token with it.
+        try:
+            os.fchmod(handle.fileno(), 0o600)
+        except (OSError, AttributeError):
+            logger.warning("Could not tighten permissions on %s", path.name)
         handle.write(json.dumps(data, indent=2))
 
 

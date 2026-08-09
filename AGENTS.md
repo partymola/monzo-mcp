@@ -38,7 +38,7 @@ SQLite at `monzo.db` (gitignored). Amounts stored in pence (integers), converted
 
 - `monzo_transactions` - id, account_id, account_type, created, amount (pence), currency, description, merchant_name, category, notes, settled, counterparty_name, counterparty_sort_code, counterparty_account_number, counterparty_user_id
 - `balances` - time-series snapshots (account_type, name, balance in pence, captured_at)
-- `sync_log` - sync history with timestamps and record counts
+- `sync_log` - sync history with timestamps, record counts and a status. The status is load-bearing: `get_last_sync_time` reads `ok` rows only and answers how fresh the cache is, while `get_last_sync_attempt` reads every row and is what throttles the automatic sync to once a day. **Throttle on attempts, never on successes** - a sync that keeps failing never advances a success timestamp, so gating on one starts a fresh full sync on every tool call. Every way out of `run_sync` writes a row, including a trailing catch-all, because this table is the only record a run leaves; a run that stops without one is invisible. Pinned by `TestTheAutoSyncThrottleCountsAttempts` and `TestAnUnnamedFailureStillLeavesASyncLogRow` in `tests/test_transactions.py`
 
 ## Key invariants
 

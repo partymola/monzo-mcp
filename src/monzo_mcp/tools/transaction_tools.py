@@ -6,7 +6,7 @@ import anyio
 
 from .. import api
 from ..api import MonzoAPIError, MonzoSCAError
-from ..db import get_db, get_last_sync_time, log_sync, save_balance
+from ..db import get_db, get_last_sync_attempt, log_sync, save_balance
 from ..helpers import format_response, pence_to_pounds, require_auth
 from ..mcp_instance import mcp
 
@@ -138,7 +138,7 @@ def run_sync(account_type: str | None = None, since: str | None = None) -> dict:
                     txns = api.get(
                         f"/transactions?account_id={acct_id}&since={since}&limit=100&expand[]=merchant"
                     ).get("transactions", [])
-                except (MonzoSCAError, MonzoAPIError):
+                except (MonzoSCAError, MonzoAPIError) as page_error:
                     if page == 0:
                         last_sync = db.execute(
                             "SELECT MAX(created) FROM monzo_transactions WHERE account_type = ?",
@@ -164,6 +164,7 @@ def run_sync(account_type: str | None = None, since: str | None = None) -> dict:
                             detail["transactions_error"] = str(e)
                             break
                     else:
+                        detail["transactions_error"] = str(page_error)
                         break
 
                 if not txns:
@@ -241,6 +242,8 @@ def run_sync(account_type: str | None = None, since: str | None = None) -> dict:
         if dupes:
             db.commit()
 
+        # An SCA refusal is deliberately not a failure: only the user
+        # approving in the Monzo app changes the outcome.
         failed = [d for d in sync_details if d.get("transactions_error")]
         status = "error" if failed else "ok"
         log_sync(
@@ -256,6 +259,10 @@ def run_sync(account_type: str | None = None, since: str | None = None) -> dict:
             "duplicates_removed": dupes,
             "details": sync_details,
         }
+    except Exception as e:
+        # Type only: these paths carry API responses.
+        log_sync(db, "error", 0, f"unexpected {type(e).__name__}")
+        raise
     finally:
         db.close()
 
@@ -266,9 +273,9 @@ def auto_sync_if_stale() -> None:
     Silently swallows all errors.
     """
     try:
-        last_sync = get_last_sync_time(get_db())
+        last_attempt = get_last_sync_attempt(get_db())
         today = date.today().isoformat()
-        if last_sync is None or last_sync[:10] < today:
+        if last_attempt is None or last_attempt[:10] < today:
             run_sync()
     except Exception:
         pass
