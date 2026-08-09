@@ -46,7 +46,8 @@ SQLite at `monzo.db` (gitignored). Amounts stored in pence (integers), converted
 - **`since` backfill** on `monzo_sync`/`run_sync`: RFC3339-coerced via `_coerce_since`, overrides the last-sync resume cursor, and reaching >90 days back only works inside the SCA window (90-day fallback otherwise)
 - **Counterparty**: the `/transactions` list endpoint already returns a `counterparty` object for bank transfers (`payport_faster_payments`, `p2p_payment`, `bacs` schemes) - no expand param or per-transaction fetch needed. Sync persists name/sort_code/account_number/user_id; list/search emit a `counterparty` object only when a name is present (card transactions are unchanged), and search matches `counterparty_name`. Rows cached before these columns existed stay NULL until re-fetched (i.e. the next sync that reaches them - beyond 90 days that means an SCA-window backfill)
 - All tools are `async def` with `@mcp.tool()` + `@require_auth`; sync HTTP calls are wrapped in `anyio.to_thread.run_sync()` to avoid blocking
-- Cache-reading tools call `auto_sync_if_stale()` before querying (incremental sync if not synced today)
+- **Comparison**: `monzo_spending`'s `vs_previous` applies the same `category` and `account_type` filters as the month it is comparing. A filtered month against an unfiltered one reports the difference between two different questions as a percentage change. Pinned by `test_vs_previous_applies_the_same_filters_as_the_month_it_compares` and `test_vs_previous_applies_a_category_filter_too` in `tests/test_spending_tool.py`
+- Cache-reading tools call `auto_sync_if_stale()` before querying - an incremental sync if not synced today **in UTC**. Both sides of that comparison must be UTC: `log_sync` stores a UTC timestamp, so an unqualified "today" is what produced the retry storm, and then a CHANGELOG sentence describing a fix that had not happened
 
 ## Running tests
 

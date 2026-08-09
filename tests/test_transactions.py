@@ -571,6 +571,51 @@ class TestTheAutoSyncThrottleCountsAttempts(unittest.TestCase):
 
         assert ran["n"] == 0
 
+    def test_a_local_evening_west_of_greenwich_counts_towards_the_next_utc_day(self):
+        """The other side of defining "today" as the UTC day.
+
+        West of Greenwich the local evening is already tomorrow in UTC, so a
+        sync there counts towards the next day and there can be one extra per
+        local day. Self-limiting: the row it writes carries the new UTC date,
+        and the equality case then throttles.
+        """
+        tmp = tempfile.TemporaryDirectory()
+        db_path = pathlib.Path(tmp.name) / "monzo.db"
+        db_conn = sqlite3.connect(db_path)
+        db_conn.row_factory = sqlite3.Row
+        db_conn.executescript(SCHEMA)
+        # 10:00 local on the 8th at UTC-7 is 17:00 UTC on the 8th.
+        db_conn.execute(
+            "INSERT INTO sync_log (synced_at, status, records_added, notes) VALUES (?, ?, ?, ?)",
+            (datetime(2026, 8, 8, 17, 0, tzinfo=timezone.utc).isoformat(), "ok", 0, ""),
+        )
+        db_conn.commit()
+
+        class _LocalIsBehindDate(date):
+            @classmethod
+            def today(cls):
+                return cls(2026, 8, 8)
+
+        class _FixedUTC(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                # 20:00 local on the 8th at UTC-7 is 03:00 UTC on the 9th.
+                if tz is None:
+                    return datetime(2026, 8, 8, 20, 0)
+                return datetime(2026, 8, 9, 3, 0, tzinfo=timezone.utc)
+
+        ran = {"n": 0}
+        with (
+            patch.object(transaction_tools, "get_db", return_value=db_conn),
+            patch.object(transaction_tools, "date", _LocalIsBehindDate, create=True),
+            patch.object(transaction_tools, "datetime", _FixedUTC),
+            patch.object(transaction_tools, "run_sync", lambda *a, **k: ran.__setitem__("n", 1)),
+        ):
+            transaction_tools.auto_sync_if_stale()
+        tmp.cleanup()
+
+        assert ran["n"] == 1
+
     def test_a_stale_cache_does_still_trigger_a_sync(self):
         """The companion assertion.
 
