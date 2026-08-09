@@ -550,6 +550,11 @@ class TestTheAutoSyncThrottleCountsAttempts(unittest.TestCase):
         class _FixedUTC(datetime):
             @classmethod
             def now(cls, tz=None):
+                # A naive now() must differ, or the fixture cannot tell
+                # datetime.now(timezone.utc) from datetime.now() - and the
+                # latter is the shorter path back to exactly this bug.
+                if tz is None:
+                    return datetime(2026, 8, 10, 0, 35)
                 return datetime(2026, 8, 9, 23, 35, tzinfo=timezone.utc)
 
         ran = {"n": 0}
@@ -565,6 +570,33 @@ class TestTheAutoSyncThrottleCountsAttempts(unittest.TestCase):
         tmp.cleanup()
 
         assert ran["n"] == 0
+
+    def test_a_stale_cache_does_still_trigger_a_sync(self):
+        """The companion assertion.
+
+        Without it, the two negative tests above pass whether the throttle
+        works or auto_sync_if_stale raises into its own bare except.
+        """
+        tmp = tempfile.TemporaryDirectory()
+        db_path = pathlib.Path(tmp.name) / "monzo.db"
+        db_conn = sqlite3.connect(db_path)
+        db_conn.row_factory = sqlite3.Row
+        db_conn.executescript(SCHEMA)
+        yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+        db_conn.execute(
+            "INSERT INTO sync_log (synced_at, status, records_added, notes) VALUES (?, ?, ?, ?)",
+            (yesterday.isoformat(), "ok", 0, ""),
+        )
+        db_conn.commit()
+
+        ran = {"n": 0}
+        with (
+            patch.object(transaction_tools, "get_db", return_value=db_conn),
+            patch.object(transaction_tools, "run_sync", lambda *a, **k: ran.__setitem__("n", 1)),
+        ):
+            transaction_tools.auto_sync_if_stale()
+        tmp.cleanup()
+        assert ran["n"] == 1
 
 
 class TestNoExceptionTextReachesTheModel(unittest.TestCase):
@@ -602,33 +634,6 @@ class TestNoExceptionTextReachesTheModel(unittest.TestCase):
         assert detail["balance_error"] == "RuntimeError"
         assert detail["pots_error"] == "RuntimeError"
         assert "/home/alice" not in json.dumps(detail)
-
-    def test_a_stale_cache_does_still_trigger_a_sync(self):
-        """The companion assertion.
-
-        Without it, the throttle test above passes whether the throttle works
-        or auto_sync_if_stale raises into its own bare except.
-        """
-        tmp = tempfile.TemporaryDirectory()
-        db_path = pathlib.Path(tmp.name) / "monzo.db"
-        db_conn = sqlite3.connect(db_path)
-        db_conn.row_factory = sqlite3.Row
-        db_conn.executescript(SCHEMA)
-        yesterday = datetime.now(timezone.utc) - timedelta(days=1)
-        db_conn.execute(
-            "INSERT INTO sync_log (synced_at, status, records_added, notes) VALUES (?, ?, ?, ?)",
-            (yesterday.isoformat(), "ok", 0, ""),
-        )
-        db_conn.commit()
-
-        ran = {"n": 0}
-        with (
-            patch.object(transaction_tools, "get_db", return_value=db_conn),
-            patch.object(transaction_tools, "run_sync", lambda *a, **k: ran.__setitem__("n", 1)),
-        ):
-            transaction_tools.auto_sync_if_stale()
-        tmp.cleanup()
-        assert ran["n"] == 1
 
 
 class TestEveryExitFromRunSyncLeavesARow(unittest.TestCase):
@@ -670,6 +675,33 @@ class TestEveryExitFromRunSyncLeavesARow(unittest.TestCase):
         assert isinstance(raised, MonzoAuthError)
         assert rows and rows[0][0] == "error"
         assert "MonzoAuthError" in rows[0][1]
+
+    def test_an_argument_rejected_before_any_call_writes_nothing(self):
+        """Deliberate, and the opposite of a hole.
+
+        A row here would advance the throttle, so a malformed argument would
+        suppress automatic syncing for the rest of the day having fetched
+        nothing. `since` is caller-supplied and reachable from the model.
+        """
+        tmp = tempfile.TemporaryDirectory()
+        db_path = pathlib.Path(tmp.name) / "monzo.db"
+        db_conn = sqlite3.connect(db_path)
+        db_conn.row_factory = sqlite3.Row
+        db_conn.executescript(SCHEMA)
+
+        calls = []
+        with (
+            patch.object(transaction_tools, "get_db", return_value=db_conn),
+            patch.object(transaction_tools.api, "get", side_effect=lambda p: calls.append(p)),
+        ):
+            result = transaction_tools.run_sync(since="not-a-date")
+
+        rows = db_conn.execute("SELECT status FROM sync_log").fetchall()
+        tmp.cleanup()
+
+        assert "error" in result
+        assert calls == []
+        assert list(rows) == []
 
     def test_finding_no_accounts_is_recorded(self):
         def fake_get(path):
