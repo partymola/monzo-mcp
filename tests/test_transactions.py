@@ -9,8 +9,8 @@ import pathlib
 import sqlite3
 import tempfile
 import unittest
-from datetime import datetime, timezone
-from unittest.mock import patch
+from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
 from monzo_mcp.api import MonzoAPIError, MonzoAuthError, MonzoSCAError
@@ -366,9 +366,9 @@ class TestAccountSelection(unittest.TestCase):
 class TestAnUnreadableResponseIsNotAnSCAPrompt(unittest.TestCase):
     """Only an SCA refusal earns the SCA note, and a failed sync is not "ok".
 
-    Telling the user to approve something in the Monzo app is the wrong answer
-    to a dropped connection, and logging the run as ok suppresses the retry
-    for the rest of the day via get_last_sync_time.
+    Telling the user to approve something in the Monzo app is the wrong
+    answer to a dropped connection, and logging the run as ok suppresses the
+    retry for the rest of the day.
     """
 
     def _run_with_transactions_failing(self, exc):
@@ -521,6 +521,157 @@ class TestTheAutoSyncThrottleCountsAttempts(unittest.TestCase):
 
     def test_a_failure_today_still_throttles_the_rest_of_the_day(self):
         assert self._runs_after_a_failure_today() == 0
+
+    def test_a_stale_cache_does_still_trigger_a_sync(self):
+        """The companion assertion.
+
+        Without it, the throttle test above passes whether the throttle works
+        or auto_sync_if_stale raises into its own bare except.
+        """
+        tmp = tempfile.TemporaryDirectory()
+        db_path = pathlib.Path(tmp.name) / "monzo.db"
+        db_conn = sqlite3.connect(db_path)
+        db_conn.row_factory = sqlite3.Row
+        db_conn.executescript(SCHEMA)
+        yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+        db_conn.execute(
+            "INSERT INTO sync_log (synced_at, status, records_added, notes) VALUES (?, ?, ?, ?)",
+            (yesterday.isoformat(), "ok", 0, ""),
+        )
+        db_conn.commit()
+
+        ran = {"n": 0}
+        with (
+            patch.object(transaction_tools, "get_db", return_value=db_conn),
+            patch.object(transaction_tools, "run_sync", lambda *a, **k: ran.__setitem__("n", 1)),
+        ):
+            transaction_tools.auto_sync_if_stale()
+        tmp.cleanup()
+        assert ran["n"] == 1
+
+
+class TestEveryExitFromRunSyncLeavesARow(unittest.TestCase):
+    """sync_log is the only record a run leaves.
+
+    The database is opened before the first API call because /accounts is
+    where a token failure surfaces, and the exit that fails there needs a
+    connection to write on.
+    """
+
+    def _statuses_after(self, fake_get):
+        tmp = tempfile.TemporaryDirectory()
+        db_path = pathlib.Path(tmp.name) / "monzo.db"
+        db_conn = sqlite3.connect(db_path)
+        db_conn.row_factory = sqlite3.Row
+        db_conn.executescript(SCHEMA)
+
+        raised = None
+        with (
+            patch.object(transaction_tools, "get_db", return_value=db_conn),
+            patch.object(transaction_tools.api, "get", side_effect=fake_get),
+        ):
+            try:
+                transaction_tools.run_sync()
+            except Exception as e:  # noqa: BLE001 - the test is what escapes
+                raised = e
+
+        reopened = sqlite3.connect(db_path)
+        rows = reopened.execute("SELECT status, notes FROM sync_log").fetchall()
+        reopened.close()
+        tmp.cleanup()
+        return raised, rows
+
+    def test_a_failure_on_the_account_lookup_is_recorded(self):
+        def fake_get(path):
+            raise MonzoAuthError("Could not obtain an access token.")
+
+        raised, rows = self._statuses_after(fake_get)
+        assert isinstance(raised, MonzoAuthError)
+        assert rows and rows[0][0] == "error"
+        assert "MonzoAuthError" in rows[0][1]
+
+    def test_finding_no_accounts_is_recorded(self):
+        def fake_get(path):
+            return {"accounts": []}
+
+        raised, rows = self._statuses_after(fake_get)
+        assert raised is None
+        assert rows and rows[0][0] == "error"
+
+    def test_a_database_that_cannot_record_it_does_not_replace_the_error(self):
+        """The row is best-effort; losing it must not hide the cause."""
+        tmp = tempfile.TemporaryDirectory()
+        db_path = pathlib.Path(tmp.name) / "monzo.db"
+        db_conn = sqlite3.connect(db_path)
+        db_conn.row_factory = sqlite3.Row
+        db_conn.executescript(SCHEMA)
+
+        with (
+            patch.object(transaction_tools, "get_db", return_value=db_conn),
+            patch.object(
+                transaction_tools.api,
+                "get",
+                side_effect=MonzoAuthError("Could not obtain an access token."),
+            ),
+            patch.object(
+                transaction_tools,
+                "log_sync",
+                MagicMock(side_effect=sqlite3.OperationalError("readonly database")),
+            ),
+        ):
+            with self.assertRaises(MonzoAuthError):
+                transaction_tools.run_sync()
+        tmp.cleanup()
+
+
+class TestSCAIsNotAFailureOnAnyPage(unittest.TestCase):
+    """Only the user approving in the Monzo app changes an SCA outcome.
+
+    Logging it as a failure would have the throttle retry something no
+    retry can fix. The page-0 branch always did this; the later-page branch
+    did not exist until it was added, and briefly logged SCA as an error.
+    """
+
+    def _run_with_sca_on_page(self, page_index):
+        tmp = tempfile.TemporaryDirectory()
+        db_path = pathlib.Path(tmp.name) / "monzo.db"
+        db_conn = sqlite3.connect(db_path)
+        db_conn.row_factory = sqlite3.Row
+        db_conn.executescript(SCHEMA)
+
+        calls = {"n": 0}
+        full_page = [
+            _mk(f"tx_{i}", amount=-100, created=f"2026-03-{i % 28 + 1:02d}T10:00:00Z", settled="s")
+            for i in range(100)
+        ]
+
+        def fake_get(path):
+            if path == "/accounts":
+                return {"accounts": [{"id": "acc_1", "type": "uk_retail", "closed": False}]}
+            if path.startswith("/transactions"):
+                calls["n"] += 1
+                if calls["n"] > page_index:
+                    raise MonzoSCAError("SCA required")
+                return {"transactions": full_page}
+            return {"balance": 0, "currency": "GBP", "pots": []}
+
+        with (
+            patch.object(transaction_tools, "get_db", return_value=db_conn),
+            patch.object(transaction_tools.api, "get", side_effect=fake_get),
+        ):
+            result = transaction_tools.run_sync()
+
+        reopened = sqlite3.connect(db_path)
+        statuses = [r[0] for r in reopened.execute("SELECT status FROM sync_log").fetchall()]
+        reopened.close()
+        tmp.cleanup()
+        return result["details"][0], statuses
+
+    def test_sca_on_a_later_page_is_a_note_not_an_error(self):
+        detail, statuses = self._run_with_sca_on_page(1)
+        assert "SCA" in detail["sca_note"]
+        assert "transactions_error" not in detail
+        assert statuses == ["ok"]
 
 
 class TestAnUnnamedFailureStillLeavesASyncLogRow(unittest.TestCase):

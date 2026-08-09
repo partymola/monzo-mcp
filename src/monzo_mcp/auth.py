@@ -69,11 +69,14 @@ def _save_json(path, data):
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as handle:
         # Best-effort: O_TRUNC has already emptied the file, so a
-        # permissions failure must not take the token with it.
-        try:
-            os.fchmod(handle.fileno(), 0o600)
-        except (OSError, AttributeError):
-            logger.warning("Could not tighten permissions on %s", path.name)
+        # permissions failure must not take the token with it. Skipped where
+        # there is no fchmod - warning on every save on Windows, which has
+        # nothing to narrow, would be noise rather than information.
+        if hasattr(os, "fchmod"):
+            try:
+                os.fchmod(handle.fileno(), 0o600)
+            except OSError:
+                logger.warning("Could not tighten permissions on %s", path.name)
         handle.write(json.dumps(data, indent=2))
 
 

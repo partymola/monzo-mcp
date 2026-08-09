@@ -1,5 +1,6 @@
 """Transaction sync, listing, and search tools."""
 
+import logging
 from datetime import date, datetime, timedelta, timezone
 
 import anyio
@@ -9,6 +10,8 @@ from ..api import MonzoAPIError, MonzoSCAError
 from ..db import get_db, get_last_sync_attempt, log_sync, save_balance
 from ..helpers import format_response, pence_to_pounds, require_auth
 from ..mcp_instance import mcp
+
+logger = logging.getLogger(__name__)
 
 
 def _format_transaction(row) -> dict:
@@ -75,13 +78,17 @@ def run_sync(account_type: str | None = None, since: str | None = None) -> dict:
                 )
             }
 
-    accounts_data = api.get("/accounts")
-    accounts = accounts_data.get("accounts", [])
-    if not accounts:
-        return {"error": "No Monzo accounts found"}
-
     db = get_db()
     try:
+        # Opened before the first API call, not after it: /accounts is where a
+        # token failure surfaces, and a row cannot be written on a connection
+        # that does not exist yet.
+        accounts_data = api.get("/accounts")
+        accounts = accounts_data.get("accounts", [])
+        if not accounts:
+            log_sync(db, "error", 0, "no accounts")
+            return {"error": "No Monzo accounts found"}
+
         total_added = 0
         accounts_synced = 0
         sync_details = []
@@ -164,7 +171,10 @@ def run_sync(account_type: str | None = None, since: str | None = None) -> dict:
                             detail["transactions_error"] = str(e)
                             break
                     else:
-                        detail["transactions_error"] = str(page_error)
+                        if isinstance(page_error, MonzoSCAError):
+                            detail["sca_note"] = "SCA required - approve in Monzo app"
+                        else:
+                            detail["transactions_error"] = str(page_error)
                         break
 
                 if not txns:
@@ -260,8 +270,13 @@ def run_sync(account_type: str | None = None, since: str | None = None) -> dict:
             "details": sync_details,
         }
     except Exception as e:
-        # Type only: these paths carry API responses.
-        log_sync(db, "error", 0, f"unexpected {type(e).__name__}")
+        # Type only: these paths carry API responses. Its own try, so a
+        # database that cannot take the row does not replace the exception
+        # that caused it.
+        try:
+            log_sync(db, "error", 0, f"unexpected {type(e).__name__}")
+        except Exception:
+            logger.error("Could not record a failed sync")
         raise
     finally:
         db.close()

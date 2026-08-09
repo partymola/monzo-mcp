@@ -114,22 +114,8 @@ def log_sync(db: sqlite3.Connection, status: str, records_added: int, notes: str
     db.commit()
 
 
-def get_last_sync_time(db: sqlite3.Connection) -> str | None:
-    """Return the ISO timestamp of the most recent successful sync, or None.
-
-    How fresh the cache is. The once-a-day throttle uses get_last_sync_attempt.
-    """
-    row = db.execute("SELECT MAX(synced_at) AS t FROM sync_log WHERE status = 'ok'").fetchone()
-    if row and row["t"]:
-        return row["t"]
-    return None
-
-
 def get_last_sync_attempt(db: sqlite3.Connection) -> str | None:
-    """Return the ISO timestamp of the most recent sync of any status, or None.
-
-    What throttles the automatic sync.
-    """
+    """Return the ISO timestamp of the most recent sync of any status, or None."""
     row = db.execute("SELECT MAX(synced_at) AS t FROM sync_log").fetchone()
     if row and row["t"]:
         return row["t"]
