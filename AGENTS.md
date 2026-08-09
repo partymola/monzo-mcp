@@ -22,7 +22,7 @@ The `scripts/check-no-data.sh` pre-commit hook enforces most of this - install i
 
 ## Architecture
 
-- **Entry point**: `src/main.py` - routes the `auth` subcommand or starts the MCP stdio server
+- **Entry point**: `src/monzo_mcp/cli.py` - routes the `auth` subcommand or starts the MCP stdio server. **Keep it inside the package.** As `src/main.py` with a `main:main` console script, the wheel installed a top-level `main` module into site-packages, where any other package doing the same overwrites it - installing a sibling MCP server made `monzo-mcp` start that server instead
 - **MCP server**: `mcp_instance.py` creates the shared `MCPServer("monzo-server")` instance
 - **Auth**: `auth.py` - OAuth setup CLI + token refresh (5-min expiry buffer). Redirect `http://localhost:6600/callback`; SCA window is 5 min after app approval for full history, then 90 days only
 - **API**: `api.py` - GET-only wrapper with auto-refresh and typed exceptions (read-only by design; no write path exists). Reads and parses in separate steps: a body that will not decode or is not JSON raises `ValueError`, which no transport handler catches, so combining them let an intermediary's HTML page escape the sync loop unrecorded.

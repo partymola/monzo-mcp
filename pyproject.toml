@@ -32,7 +32,7 @@ dev = [
 ]
 
 [project.scripts]
-monzo-mcp = "main:main"
+monzo-mcp = "monzo_mcp.cli:main"
 
 [project.urls]
 Repository = "https://github.com/partymola/monzo-mcp"
@@ -49,4 +49,4 @@ target-version = "py313"
 select = ["E", "F", "I"]
 
 [tool.ruff.lint.per-file-ignores]
-"src/main.py" = ["E402"]
+"src/monzo_mcp/cli.py" = ["E402"]
