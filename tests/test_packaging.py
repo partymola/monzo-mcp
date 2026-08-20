@@ -68,11 +68,10 @@ def _under(path, directory):
     """True if `path` is `directory` or genuinely inside it, after normalising.
 
     `posixpath` rather than `os.path`: these are paths inside a Linux image but
-    the comparison runs on whatever host the suite is on, and the native flavour
-    on Windows rewrites them with backslashes and folds case, so nothing
-    contains anything and `/DATA/config` reads as under `/data`. It has to
-    normalise rather than compare path components, or `/data/../elsewhere`
-    counts as inside `/data`.
+    the comparison runs on whatever host the suite is on, and `ntpath.normpath`
+    rewrites them with backslash separators, so nothing contains anything. It
+    has to normalise rather than compare path components, or a path that climbs
+    back out with `..` counts as inside.
     """
     path = posixpath.normpath(path)
     directory = posixpath.normpath(directory)
