@@ -13,6 +13,7 @@ keywords = ["monzo", "mcp", "model-context-protocol", "banking", "finance"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Topic :: Office/Business :: Financial",

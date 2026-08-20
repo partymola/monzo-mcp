@@ -12,9 +12,9 @@ scrubbed the environment would pass here and fail in reality.
 """
 
 import json
-import os
 import re
 import unittest
+from pathlib import PurePosixPath
 
 from monzo_mcp import config
 
@@ -65,10 +65,15 @@ def _dockerfile_env():
 
 
 def _under(path, directory):
-    """True if `path` is `directory` or genuinely inside it, after normalising."""
-    path = os.path.normpath(path)
-    directory = os.path.normpath(directory)
-    return path == directory or path.startswith(directory.rstrip("/") + "/")
+    """True if `path` is `directory` or genuinely inside it.
+
+    PurePosixPath rather than os.path: these are paths inside a Linux image but
+    the comparison runs on whatever host the suite is on, and the native flavour
+    on Windows rewrites them with backslashes and reports `/data` as relative.
+    """
+    path = PurePosixPath(path)
+    directory = PurePosixPath(directory)
+    return path == directory or directory in path.parents
 
 
 def _readme_code_lines():

@@ -742,6 +742,9 @@ class TestEveryExitFromRunSyncLeavesARow(unittest.TestCase):
             result = transaction_tools.run_sync(since="not-a-date")
 
         rows = db_conn.execute("SELECT status FROM sync_log").fetchall()
+        # The rejection returns before get_db is reached, so nothing else closes
+        # this one. Windows refuses to delete a file that is still open.
+        db_conn.close()
         tmp.cleanup()
 
         assert "error" in result
