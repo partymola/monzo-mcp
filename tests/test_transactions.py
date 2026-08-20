@@ -152,6 +152,7 @@ class TestAuthHoldDedup(unittest.TestCase):
         # A distinct name per test avoids cross-test sharing of the cache.
         uri = f"file:{name}?mode=memory&cache=shared"
         holder = sqlite3.connect(uri, uri=True)
+        self.addCleanup(holder.close)
         holder.row_factory = sqlite3.Row
         holder.executescript(SCHEMA)
 
@@ -206,7 +207,6 @@ class TestAuthHoldDedup(unittest.TestCase):
             r["id"] for r in holder.execute("SELECT id FROM monzo_transactions").fetchall()
         }
         self.assertEqual(remaining, {"dup_settled", "both_a", "both_b", "solo"})
-        holder.close()
 
     def test_matching_pair_outside_time_window_is_kept(self):
         # Same merchant/amount/account and one unsettled, but ~1 hour apart -
@@ -235,7 +235,6 @@ class TestAuthHoldDedup(unittest.TestCase):
             r["id"] for r in holder.execute("SELECT id FROM monzo_transactions").fetchall()
         }
         self.assertEqual(remaining, {"far_hold", "far_settled"})
-        holder.close()
 
 
 class TestCounterpartySync(unittest.TestCase):
@@ -261,6 +260,7 @@ class TestCounterpartySync(unittest.TestCase):
 
         uri = "file:counterparty_sync_test?mode=memory&cache=shared"
         holder = sqlite3.connect(uri, uri=True)
+        self.addCleanup(holder.close)
         holder.row_factory = sqlite3.Row
         holder.executescript(SCHEMA)
 
@@ -288,7 +288,6 @@ class TestCounterpartySync(unittest.TestCase):
         # Card transactions have no counterparty at all
         self.assertIsNone(rows["tx_card"]["counterparty_name"])
         self.assertIsNone(rows["tx_card"]["counterparty_user_id"])
-        holder.close()
 
 
 class TestScaFallback(unittest.TestCase):
@@ -373,9 +372,11 @@ class TestAnUnreadableResponseIsNotAnSCAPrompt(unittest.TestCase):
     """
 
     def _run_with_transactions_failing(self, exc):
-        self._tmp = tempfile.TemporaryDirectory()
-        db_path = pathlib.Path(self._tmp.name) / "monzo.db"
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = pathlib.Path(tmp.name) / "monzo.db"
         db_conn = sqlite3.connect(db_path)
+        self.addCleanup(db_conn.close)
         db_conn.row_factory = sqlite3.Row
         db_conn.executescript(SCHEMA)
 
@@ -393,9 +394,8 @@ class TestAnUnreadableResponseIsNotAnSCAPrompt(unittest.TestCase):
             result = transaction_tools.run_sync()
 
         reopened = sqlite3.connect(db_path)
+        self.addCleanup(reopened.close)
         rows = reopened.execute("SELECT status FROM sync_log").fetchall()
-        reopened.close()
-        self._tmp.cleanup()
         return result, [r[0] for r in rows]
 
     def test_an_api_error_is_not_reported_as_sca(self):
@@ -418,8 +418,10 @@ class TestAnUnreadableResponseIsNotAnSCAPrompt(unittest.TestCase):
 
     def test_a_clean_sync_is_still_logged_as_ok(self):
         tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
         db_path = pathlib.Path(tmp.name) / "monzo.db"
         db_conn = sqlite3.connect(db_path)
+        self.addCleanup(db_conn.close)
         db_conn.row_factory = sqlite3.Row
         db_conn.executescript(SCHEMA)
 
@@ -437,9 +439,8 @@ class TestAnUnreadableResponseIsNotAnSCAPrompt(unittest.TestCase):
             transaction_tools.run_sync()
 
         reopened = sqlite3.connect(db_path)
+        self.addCleanup(reopened.close)
         rows = reopened.execute("SELECT status FROM sync_log").fetchall()
-        reopened.close()
-        tmp.cleanup()
         assert [r[0] for r in rows] == ["ok"]
 
 
@@ -454,8 +455,10 @@ class TestALaterPageFailingIsAlsoAFailure(unittest.TestCase):
 
     def test_a_failure_on_a_later_page_is_recorded(self):
         tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
         db_path = pathlib.Path(tmp.name) / "monzo.db"
         db_conn = sqlite3.connect(db_path)
+        self.addCleanup(db_conn.close)
         db_conn.row_factory = sqlite3.Row
         db_conn.executescript(SCHEMA)
 
@@ -482,9 +485,8 @@ class TestALaterPageFailingIsAlsoAFailure(unittest.TestCase):
             result = transaction_tools.run_sync()
 
         reopened = sqlite3.connect(db_path)
+        self.addCleanup(reopened.close)
         statuses = [r[0] for r in reopened.execute("SELECT status FROM sync_log").fetchall()]
-        reopened.close()
-        tmp.cleanup()
 
         assert "transactions_error" in result["details"][0]
         assert statuses == ["error"]
@@ -501,8 +503,10 @@ class TestTheAutoSyncThrottleCountsAttempts(unittest.TestCase):
 
     def _runs_after_a_failure_today(self):
         tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
         db_path = pathlib.Path(tmp.name) / "monzo.db"
         db_conn = sqlite3.connect(db_path)
+        self.addCleanup(db_conn.close)
         db_conn.row_factory = sqlite3.Row
         db_conn.executescript(SCHEMA)
         db_conn.execute(
@@ -517,7 +521,6 @@ class TestTheAutoSyncThrottleCountsAttempts(unittest.TestCase):
             patch.object(transaction_tools, "run_sync", lambda *a, **k: ran.__setitem__("n", 1)),
         ):
             transaction_tools.auto_sync_if_stale()
-        tmp.cleanup()
         return ran["n"]
 
     def test_a_failure_today_still_throttles_the_rest_of_the_day(self):
@@ -531,8 +534,10 @@ class TestTheAutoSyncThrottleCountsAttempts(unittest.TestCase):
         never self-corrects - one hour in BST, half a day at UTC+13.
         """
         tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
         db_path = pathlib.Path(tmp.name) / "monzo.db"
         db_conn = sqlite3.connect(db_path)
+        self.addCleanup(db_conn.close)
         db_conn.row_factory = sqlite3.Row
         db_conn.executescript(SCHEMA)
         # 23:30 UTC on the 9th: a sync that has only just finished.
@@ -567,7 +572,6 @@ class TestTheAutoSyncThrottleCountsAttempts(unittest.TestCase):
             patch.object(transaction_tools, "run_sync", lambda *a, **k: ran.__setitem__("n", 1)),
         ):
             transaction_tools.auto_sync_if_stale()
-        tmp.cleanup()
 
         assert ran["n"] == 0
 
@@ -580,8 +584,10 @@ class TestTheAutoSyncThrottleCountsAttempts(unittest.TestCase):
         and the equality case then throttles.
         """
         tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
         db_path = pathlib.Path(tmp.name) / "monzo.db"
         db_conn = sqlite3.connect(db_path)
+        self.addCleanup(db_conn.close)
         db_conn.row_factory = sqlite3.Row
         db_conn.executescript(SCHEMA)
         # 10:00 local on the 8th at UTC-7 is 17:00 UTC on the 8th.
@@ -612,7 +618,6 @@ class TestTheAutoSyncThrottleCountsAttempts(unittest.TestCase):
             patch.object(transaction_tools, "run_sync", lambda *a, **k: ran.__setitem__("n", 1)),
         ):
             transaction_tools.auto_sync_if_stale()
-        tmp.cleanup()
 
         assert ran["n"] == 1
 
@@ -623,8 +628,10 @@ class TestTheAutoSyncThrottleCountsAttempts(unittest.TestCase):
         works or auto_sync_if_stale raises into its own bare except.
         """
         tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
         db_path = pathlib.Path(tmp.name) / "monzo.db"
         db_conn = sqlite3.connect(db_path)
+        self.addCleanup(db_conn.close)
         db_conn.row_factory = sqlite3.Row
         db_conn.executescript(SCHEMA)
         yesterday = datetime.now(timezone.utc) - timedelta(days=1)
@@ -640,7 +647,6 @@ class TestTheAutoSyncThrottleCountsAttempts(unittest.TestCase):
             patch.object(transaction_tools, "run_sync", lambda *a, **k: ran.__setitem__("n", 1)),
         ):
             transaction_tools.auto_sync_if_stale()
-        tmp.cleanup()
         assert ran["n"] == 1
 
 
@@ -653,8 +659,10 @@ class TestNoExceptionTextReachesTheModel(unittest.TestCase):
 
     def _details_when_balance_and_pots_fail(self, exc):
         tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
         db_path = pathlib.Path(tmp.name) / "monzo.db"
         db_conn = sqlite3.connect(db_path)
+        self.addCleanup(db_conn.close)
         db_conn.row_factory = sqlite3.Row
         db_conn.executescript(SCHEMA)
 
@@ -670,7 +678,6 @@ class TestNoExceptionTextReachesTheModel(unittest.TestCase):
             patch.object(transaction_tools.api, "get", side_effect=fake_get),
         ):
             result = transaction_tools.run_sync()
-        tmp.cleanup()
         return result["details"][0]
 
     def test_neither_balance_nor_pots_repeats_the_message(self):
@@ -691,8 +698,10 @@ class TestEveryExitFromRunSyncLeavesARow(unittest.TestCase):
 
     def _statuses_after(self, fake_get):
         tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
         db_path = pathlib.Path(tmp.name) / "monzo.db"
         db_conn = sqlite3.connect(db_path)
+        self.addCleanup(db_conn.close)
         db_conn.row_factory = sqlite3.Row
         db_conn.executescript(SCHEMA)
 
@@ -707,9 +716,8 @@ class TestEveryExitFromRunSyncLeavesARow(unittest.TestCase):
                 raised = e
 
         reopened = sqlite3.connect(db_path)
+        self.addCleanup(reopened.close)
         rows = reopened.execute("SELECT status, notes FROM sync_log").fetchall()
-        reopened.close()
-        tmp.cleanup()
         return raised, rows
 
     def test_a_failure_on_the_account_lookup_is_recorded(self):
@@ -729,8 +737,10 @@ class TestEveryExitFromRunSyncLeavesARow(unittest.TestCase):
         nothing. `since` is caller-supplied and reachable from the model.
         """
         tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
         db_path = pathlib.Path(tmp.name) / "monzo.db"
         db_conn = sqlite3.connect(db_path)
+        self.addCleanup(db_conn.close)
         db_conn.row_factory = sqlite3.Row
         db_conn.executescript(SCHEMA)
 
@@ -742,9 +752,6 @@ class TestEveryExitFromRunSyncLeavesARow(unittest.TestCase):
             result = transaction_tools.run_sync(since="not-a-date")
 
         rows = db_conn.execute("SELECT status FROM sync_log").fetchall()
-        # Windows refuses to delete a file that is still open.
-        db_conn.close()
-        tmp.cleanup()
 
         assert "error" in result
         assert calls == []
@@ -761,8 +768,10 @@ class TestEveryExitFromRunSyncLeavesARow(unittest.TestCase):
     def test_a_database_that_cannot_record_it_does_not_replace_the_error(self):
         """The row is best-effort; losing it must not hide the cause."""
         tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
         db_path = pathlib.Path(tmp.name) / "monzo.db"
         db_conn = sqlite3.connect(db_path)
+        self.addCleanup(db_conn.close)
         db_conn.row_factory = sqlite3.Row
         db_conn.executescript(SCHEMA)
 
@@ -781,7 +790,6 @@ class TestEveryExitFromRunSyncLeavesARow(unittest.TestCase):
         ):
             with self.assertRaises(MonzoAuthError):
                 transaction_tools.run_sync()
-        tmp.cleanup()
 
 
 class TestSCAIsNotAFailureOnAnyPage(unittest.TestCase):
@@ -794,8 +802,10 @@ class TestSCAIsNotAFailureOnAnyPage(unittest.TestCase):
 
     def _run_with_sca_on_page(self, page_index):
         tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
         db_path = pathlib.Path(tmp.name) / "monzo.db"
         db_conn = sqlite3.connect(db_path)
+        self.addCleanup(db_conn.close)
         db_conn.row_factory = sqlite3.Row
         db_conn.executescript(SCHEMA)
 
@@ -822,9 +832,8 @@ class TestSCAIsNotAFailureOnAnyPage(unittest.TestCase):
             result = transaction_tools.run_sync()
 
         reopened = sqlite3.connect(db_path)
+        self.addCleanup(reopened.close)
         statuses = [r[0] for r in reopened.execute("SELECT status FROM sync_log").fetchall()]
-        reopened.close()
-        tmp.cleanup()
         return result["details"][0], statuses
 
     def test_sca_on_a_later_page_is_a_note_not_an_error(self):
@@ -844,8 +853,10 @@ class TestAnUnnamedFailureStillLeavesASyncLogRow(unittest.TestCase):
 
     def _statuses_after(self, exc):
         tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
         db_path = pathlib.Path(tmp.name) / "monzo.db"
         db_conn = sqlite3.connect(db_path)
+        self.addCleanup(db_conn.close)
         db_conn.row_factory = sqlite3.Row
         db_conn.executescript(SCHEMA)
 
@@ -862,9 +873,8 @@ class TestAnUnnamedFailureStillLeavesASyncLogRow(unittest.TestCase):
                 transaction_tools.run_sync()
 
         reopened = sqlite3.connect(db_path)
+        self.addCleanup(reopened.close)
         rows = reopened.execute("SELECT status, notes FROM sync_log").fetchall()
-        reopened.close()
-        tmp.cleanup()
         return rows
 
     def test_an_auth_failure_is_recorded_and_still_raised(self):
