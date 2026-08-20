@@ -7,9 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `monzo-mcp auth` reports a busy callback port instead of ending in a traceback, and binds it before opening the browser rather than after, so a run that cannot receive the callback does not send you to an authorisation page first.
+
 ### Packaging
 
 - The package declares `Operating System :: OS Independent`, and CI runs the suite on Linux, macOS and Windows. It had only ever been tested on Linux while declaring nothing about platform support.
+
+### Security
+
+- On Windows, `monzo-mcp auth` no longer lets another process take over the port the authorisation code arrives on. The callback listener inherited `allow_reuse_address` from `http.server`, which on POSIX only waives the wait after a previous run. Windows reads it as consent to be displaced, so another process could bind over the live listener and receive the callback - and the code it carries is enough to obtain the tokens. The listener no longer asks to share the address, and asks for exclusive use as well. Both halves matter here: not asking is what closes it when the listener is bound to one interface, and exclusive use is what closes it when `MONZO_MCP_CALLBACK_HOST` widens the bind, as the container image does. The cost is Windows-only: after a run the port stays held until the previous connection has finished closing, normally a couple of minutes, and `auth` has to be retried until it has. Nothing changes on Linux or macOS.
 
 ## [0.6.1] - 2026-08-09
 

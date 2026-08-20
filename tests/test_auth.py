@@ -6,10 +6,13 @@ mocked. Time is pinned via a datetime subclass so the 5-minute expiry buffer and
 the stored expiry timestamps are exact, not approximate.
 """
 
+import ast
+import inspect
 import io
 import json
 import os
 import pathlib
+import socket
 import sys
 import tempfile
 import unittest
@@ -438,7 +441,10 @@ def _run_setup(
         patch.object(auth, "_save_json", fake_save),
         patch.object(auth, "_load_json", fake_load),
         patch.object(auth, "webbrowser"),
-        patch.object(auth, "HTTPServer", _server_factory(callback_path, recorded, bound)),
+        # The name setup_auth actually constructs. Patching HTTPServer instead
+        # binds a real socket on every one of these tests while still looking
+        # like it is driving a stand-in.
+        patch.object(auth, "_CallbackServer", _server_factory(callback_path, recorded, bound)),
         patch("urllib.request.urlopen", fake_urlopen),
         patch("builtins.input", side_effect=inputs),
         patch.object(sys, "stdout", out),
@@ -741,3 +747,128 @@ class TestWhereTheCallbackServerBinds(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# SO_EXCLUSIVEADDRUSE does not exist off Windows, so the branch is driven
+# against this stand-in value.
+_EXCLUSIVE = 0xFFFFFFFF
+
+
+class _RecordingSocket:
+    """Stands in for the real socket so server_bind's Windows branch can run."""
+
+    def __init__(self):
+        self.calls = []
+
+    def setsockopt(self, level, option, value):
+        self.calls.append(("setsockopt", level, option, value))
+
+    def bind(self, address):
+        self.calls.append(("bind", address))
+
+    def getsockname(self):
+        return ("127.0.0.1", auth.MONZO_CALLBACK_PORT)
+
+
+class TestTheCallbackPortIsNotShared(unittest.TestCase):
+    """The listener carries the authorisation code, so it must not be displaceable.
+
+    `server_bind` chooses on `sys.platform` at call time, so the Windows branch
+    is reachable from a POSIX runner against a recording socket. That is worth
+    more than reading the source for it: a source assertion lets the option be
+    set after the bind, at the wrong level, on the wrong socket, or with a
+    value of 0, all of which pass a check that only looks for the name.
+    """
+
+    def _bind_as(self, platform):
+        with (
+            patch.object(auth.sys, "platform", platform),
+            patch.object(auth.socket, "SO_EXCLUSIVEADDRUSE", _EXCLUSIVE, create=True),
+            patch.object(auth.socket, "getfqdn", lambda host: host),
+        ):
+            server = auth._CallbackServer.__new__(auth._CallbackServer)
+            server.socket = _RecordingSocket()
+            server.server_address = (auth.MONZO_CALLBACK_HOST, auth.MONZO_CALLBACK_PORT)
+            # Fixed at import against the real platform, so it is supplied here
+            # rather than read; the class attribute is pinned separately.
+            server.allow_reuse_address = platform != "win32"
+            server.allow_reuse_port = False
+            auth._CallbackServer.server_bind(server)
+            return server.socket.calls
+
+    def test_windows_asks_for_exclusive_use_before_binding(self):
+        # _EXCLUSIVE is the sentinel _bind_as patches in, because the real
+        # constant does not exist off Windows and the patch is gone by now.
+        calls = self._bind_as("win32")
+        self.assertEqual(
+            calls[0],
+            ("setsockopt", socket.SOL_SOCKET, _EXCLUSIVE, 1),
+            calls,
+        )
+        self.assertTrue(any(call[0] == "bind" for call in calls), calls)
+        # Never both: asking to share after asking not to is the configuration
+        # Microsoft documents as insecure.
+        self.assertFalse(
+            any(
+                call[:3] == ("setsockopt", socket.SOL_SOCKET, socket.SO_REUSEADDR) for call in calls
+            ),
+            calls,
+        )
+
+    def test_posix_asks_for_nothing_exclusive(self):
+        calls = self._bind_as("linux")
+        self.assertFalse(
+            any(call[0] == "setsockopt" and call[2] == _EXCLUSIVE for call in calls),
+            calls,
+        )
+
+    def test_reuse_is_allowed_off_windows_and_refused_on_it(self):
+        """Not asking to share closes the specific-address case; the exclusive
+        option is what still holds when the bind is a wildcard, which this
+        server's is whenever MONZO_MCP_CALLBACK_HOST is widened."""
+        self.assertEqual(auth._CallbackServer.allow_reuse_address, sys.platform != "win32")
+        tree = ast.parse(inspect.getsource(auth._CallbackServer))
+        assigned = [
+            ast.unparse(node.value)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and any(getattr(t, "id", None) == "allow_reuse_address" for t in node.targets)
+        ]
+        self.assertTrue(assigned, "allow_reuse_address is no longer set here")
+        self.assertTrue(all("platform" in value for value in assigned), assigned)
+
+    def test_only_win32_is_named(self):
+        """`sys.platform` is `win32` on 64-bit Windows too, so a `win64` test
+        is a branch that never runs."""
+        tree = ast.parse(inspect.getsource(auth._CallbackServer))
+        compared = {
+            const.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Compare) and ast.unparse(node.left) == "sys.platform"
+            for const in node.comparators
+            if isinstance(const, ast.Constant)
+        }
+        self.assertEqual(compared, {"win32"}, compared)
+
+    @unittest.skipIf(sys.platform == "win32", "binds a real POSIX socket")
+    def test_it_still_binds(self):
+        """server_bind is overridden, so a mistake there breaks `auth` outright."""
+        server = auth._CallbackServer(("localhost", 0), auth.BaseHTTPRequestHandler)
+        try:
+            self.assertEqual(server.server_address[0], "127.0.0.1")
+            self.assertNotEqual(server.server_address[1], 0)
+        finally:
+            server.server_close()
+
+    def test_no_bare_httpserver_is_constructed_anywhere(self):
+        """Scoped to the module, not to setup_auth: a second listener added
+        elsewhere would carry the default this class exists to refuse."""
+        tree = ast.parse(inspect.getsource(auth))
+        bare = [
+            node.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "HTTPServer"
+        ]
+        self.assertFalse(bare, bare)

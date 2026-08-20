@@ -4,6 +4,7 @@ import http.client
 import json
 import logging
 import os
+import socket
 import sys
 import urllib.error
 import urllib.request
@@ -30,6 +31,28 @@ logger = logging.getLogger(__name__)
 # with no opinion about the grant, and this client already reads 403 on a data
 # request as an SCA prompt.
 _REFUSAL_CODES = frozenset({400, 401})
+
+
+class _CallbackServer(HTTPServer):
+    """Refuse to share the port the authorisation code arrives on.
+
+    Deliberate, and not what `HTTPServer` does by default: it asks for address
+    reuse, which on Windows is what lets another process bind over this
+    listener and take the code. Both halves below are load-bearing here, and
+    which one carries the weight depends on `MONZO_MCP_CALLBACK_HOST` - the
+    reasoning is in AGENTS.md. Pinned by TestTheCallbackPortIsNotShared, which
+    drives this method's Windows branch on a POSIX runner.
+    """
+
+    allow_reuse_address = sys.platform != "win32"
+    # SO_REUSEPORT is the POSIX-side version of the same hazard; nothing sets
+    # this, and nothing should.
+    allow_reuse_port = False
+
+    def server_bind(self):
+        if sys.platform == "win32":
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
 
 class TokenRefused(RuntimeError):
@@ -249,11 +272,25 @@ def setup_auth():
         def log_message(self, format, *a):
             pass
 
+    # Bind before opening the browser: the listener no longer asks to share the
+    # port, so a busy one is now a real failure, and sending the user to an
+    # authorisation page whose redirect has nowhere to land wastes the attempt.
+    try:
+        server = _CallbackServer((MONZO_CALLBACK_HOST, MONZO_CALLBACK_PORT), CallbackHandler)
+    except OSError:
+        print(
+            f"Port {MONZO_CALLBACK_PORT} on {MONZO_CALLBACK_HOST} is in use, so the callback "
+            "cannot be received. It must match the redirect URL registered with Monzo and so "
+            "cannot be changed. On Windows a socket from a recent `monzo-mcp auth` may still "
+            "be closing; retry once it has.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     print("\nOpening browser for Monzo auth...")
     print(f"URL: {auth_url}\n")
     webbrowser.open(auth_url)
 
-    server = HTTPServer((MONZO_CALLBACK_HOST, MONZO_CALLBACK_PORT), CallbackHandler)
     print("Waiting for callback... (approve in Monzo app)")
     server.handle_request()
 
