@@ -12,9 +12,9 @@ scrubbed the environment would pass here and fail in reality.
 """
 
 import json
+import posixpath
 import re
 import unittest
-from pathlib import PurePosixPath
 
 from monzo_mcp import config
 
@@ -65,15 +65,18 @@ def _dockerfile_env():
 
 
 def _under(path, directory):
-    """True if `path` is `directory` or genuinely inside it.
+    """True if `path` is `directory` or genuinely inside it, after normalising.
 
-    PurePosixPath rather than os.path: these are paths inside a Linux image but
+    `posixpath` rather than `os.path`: these are paths inside a Linux image but
     the comparison runs on whatever host the suite is on, and the native flavour
-    on Windows rewrites them with backslashes and reports `/data` as relative.
+    on Windows rewrites them with backslashes and folds case, so nothing
+    contains anything and `/DATA/config` reads as under `/data`. It has to
+    normalise rather than compare path components, or `/data/../elsewhere`
+    counts as inside `/data`.
     """
-    path = PurePosixPath(path)
-    directory = PurePosixPath(directory)
-    return path == directory or directory in path.parents
+    path = posixpath.normpath(path)
+    directory = posixpath.normpath(directory)
+    return path == directory or path.startswith(directory.rstrip("/") + "/")
 
 
 def _readme_code_lines():
@@ -90,6 +93,34 @@ def _readme_code_lines():
         if fenced:
             lines.append(line)
     return re.sub(r"\\\s*\n\s*", " ", "\n".join(lines)).splitlines()
+
+
+class TestTheContainmentPredicate(unittest.TestCase):
+    """`_under` has edge cases that nothing else in this file reaches.
+
+    Both call sites compare paths that are equal today, so an equality
+    assertion carries them and the containment branch is never exercised: a
+    predicate that answered anything at all would pass the rest of the file.
+    The branch only starts mattering when a third path variable is added,
+    which is what the loop around it exists for.
+    """
+
+    def test_a_path_inside_is_under(self):
+        self.assertTrue(_under("/data/config", "/data"))
+
+    def test_the_directory_itself_is_under(self):
+        self.assertTrue(_under("/data", "/data"))
+
+    def test_a_sibling_sharing_a_prefix_is_not(self):
+        self.assertFalse(_under("/dataX/config", "/data"))
+
+    def test_a_path_escaping_upwards_is_not(self):
+        """Why this normalises rather than comparing path components."""
+        self.assertFalse(_under("/data/../elsewhere", "/data"))
+        self.assertFalse(_under("/data/../../etc", "/data"))
+
+    def test_a_relative_path_is_not(self):
+        self.assertFalse(_under("config", "/data"))
 
 
 class TestTheContainerStoresDataOnAVolume(unittest.TestCase):

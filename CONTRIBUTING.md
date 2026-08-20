@@ -27,7 +27,7 @@ The repo ships with `scripts/check-no-data.sh`, which blocks commits that contai
 ln -sf ../../scripts/check-no-data.sh .git/hooks/pre-commit
 ```
 
-Please install it before your first commit.
+Please install it before your first commit. On Windows, Git Bash copies rather than symlinks unless Developer Mode is on, and a copied hook keeps running whatever the script said when you installed it - re-copy it after any change to `scripts/check-no-data.sh`.
 
 ### Run the test suite
 

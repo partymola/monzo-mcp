@@ -28,8 +28,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
-      # Lint results do not vary by OS, so running this on all three only
-      # triples the wall clock.
+      # ruff's verdict does not vary by OS, so running it in every job would
+      # just repeat the same work.
       - name: Lint
         if: matrix.os == 'ubuntu-latest'
         run: |

@@ -70,6 +70,8 @@ This opens your browser for Monzo OAuth. After authorizing, approve the login in
 claude mcp add -s user monzo -- /path/to/monzo-mcp/.venv/bin/monzo-mcp
 ```
 
+On Windows the console script is at `.venv\Scripts\monzo-mcp.exe`.
+
 ### 4. First sync
 
 In Claude Code, run `monzo_sync` to populate the local transaction cache. Do this immediately after auth to take advantage of the SCA window (up to 11 months of history).

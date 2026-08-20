@@ -65,6 +65,4 @@ A claim sits at a seam when no input to the program can make its test fail. Beha
 
 ## Running tests
 
-```bash
-.venv/bin/python -m pytest tests/ -v
-```
+See [CONTRIBUTING.md](CONTRIBUTING.md#run-the-test-suite), which carries the command and the per-platform interpreter paths. Keep it the only copy.
