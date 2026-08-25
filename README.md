@@ -33,7 +33,7 @@ Unlike other Monzo MCP implementations that use raw bearer tokens (which expire 
 
 ## Prerequisites
 
-- Python 3.13+
+- Python 3.13+ (tested on 3.13 and 3.14, on Linux, macOS and Windows, in CI)
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
 - A Monzo account with an OAuth client registered at [developers.monzo.com](https://developers.monzo.com)
 
