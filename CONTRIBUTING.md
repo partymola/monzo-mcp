@@ -35,7 +35,7 @@ Please install it before your first commit. On Windows, Git Bash copies rather t
 .venv/bin/python -m pytest tests/ -v      # .venv\Scripts\python on Windows
 ```
 
-CI runs this on Linux, macOS and Windows. Tests are fully offline - no real API calls, no real tokens. Fixtures use fictional merchants and round amounts; never paste real transaction data into tests.
+CI runs this on Linux, macOS and Windows. Tests are fully offline - no real API calls, no real tokens, and no reads of your own cache. Autouse fixtures in `tests/conftest.py` enforce that rather than trusting each test to: your credential files and `monzo.db` are replaced with paths in a temporary directory, and a test that reaches `urllib.request.urlopen` fails. Fixtures use fictional merchants and round amounts; never paste real transaction data into tests.
 
 ### Run lint checks
 

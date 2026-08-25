@@ -584,6 +584,11 @@ class TestCredentialFilesAreRefusals(unittest.TestCase):
         if tokens is not None:
             tokens_path.write_text(tokens)
         creds_path.write_text(creds)
+        # Deliberate, not left over now that conftest isolates these paths as
+        # well: the files written above are the ones under test, and without
+        # the patches `auth` would read conftest's empty directory instead -
+        # so every case here would exercise the missing-file branch and still
+        # pass, `_load_json` reporting missing and unparseable alike.
         with (
             patch.object(auth, "MONZO_TOKENS_PATH", tokens_path),
             patch.object(auth, "MONZO_CLIENT_PATH", creds_path),

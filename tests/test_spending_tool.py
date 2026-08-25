@@ -392,6 +392,11 @@ class TestSpendingTool(unittest.TestCase):
 
     def test_auth_negative_path(self):
         # Missing credentials -> auth error, and the DB is never touched.
+        # The two path patches are deliberate, not left over: conftest's
+        # `_no_real_credentials` already makes both absent, so without them
+        # this test would assert its own precondition by borrowing the
+        # harness's - and would keep passing if that harness ever supplied a
+        # credential instead.
         db_factory = Mock()
         with (
             patch.object(helpers, "MONZO_CLIENT_PATH", _NotExists()),
