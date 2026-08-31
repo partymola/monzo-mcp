@@ -5,7 +5,7 @@ from datetime import date, timedelta
 import anyio
 
 from ..db import get_db
-from ..helpers import format_response, pence_to_pounds, require_auth
+from ..helpers import AccountType, format_response, parse_month, pence_to_pounds, require_auth
 from ..mcp_instance import mcp
 from .transaction_tools import auto_sync_if_stale
 
@@ -15,7 +15,7 @@ from .transaction_tools import auto_sync_if_stale
 async def monzo_spending(
     month: str | None = None,
     category: str | None = None,
-    account_type: str | None = None,
+    account_type: AccountType | None = None,
     detail: bool = False,
 ) -> str:
     """Analyse spending from cached Monzo transactions.
@@ -31,6 +31,8 @@ async def monzo_spending(
         account_type: "personal" or "joint" (default: all)
         detail: If true, return individual transactions instead of category summary
     """
+    if month is not None:
+        month = parse_month(month)
 
     def _analyse():
         auto_sync_if_stale()

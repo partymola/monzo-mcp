@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from monzo_mcp import helpers
+from monzo_mcp.mcp_instance import mcp
 from monzo_mcp.tools import account_tools
 
 ACCOUNTS = [
@@ -92,8 +93,19 @@ class TestListPots(unittest.TestCase):
         self.assertEqual(saved, [("joint", "Bills", 694224), ("joint", "Holiday", 5000)])
 
     def test_invalid_account_type_is_rejected(self):
-        result = _call(account_tools.monzo_list_pots, account_type="savings")
-        self.assertIn("error", result)
+        """Through the server, because the constraint is in the schema.
+
+        Called directly the tool reaches `_resolve_account_id` and fails for a
+        different reason, which would pass while proving nothing.
+        """
+        schema = next(t for t in asyncio.run(mcp.list_tools()) if t.name == "monzo_list_pots")
+        self.assertEqual(
+            schema.input_schema["properties"]["account_type"]["enum"],
+            ["personal", "joint"],
+        )
+        with self.assertRaises(Exception) as caught:
+            asyncio.run(mcp.call_tool("monzo_list_pots", {"account_type": "savings"}))
+        self.assertIn("savings", str(caught.exception))
 
 
 if __name__ == "__main__":

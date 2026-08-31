@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-08-31
+
+### Fixed
+
+- An invalid filter argument is refused instead of being answered with an empty result. `monzo_spending` given a `month` it could not parse reported `grand_total: 0`, and `monzo_list_transactions` and `monzo_search_transactions` given an unrecognised `account_type`, or a `since` or `before` that was not a date, reported no transactions. In each case the value reached the query as a filter that matched nothing, so the answer was indistinguishable from a real month with no spending or an account with no activity - which is the wrong answer to give about money, and worse than an error because nothing about it looks wrong. The tools now say what was rejected and what form was expected.
+- `monzo_spending` reads the month it was asked for. A single-digit month such as `2026-1` was used as a text prefix, so it matched October, November and December and reported their spending under January - with a total plausible enough not to invite a second look. Months are now zero-padded before the query.
+- `since` and `before` on the listing and search tools take a date, which is what those tools have always documented, and it is zero-padded before the query. `2026-1-1` was previously used as written, and because it sorts above every padded month `01` to `09` and below `10` to `12`, asking for transactions since 1 January returned only October onwards. Other spellings that cannot be ordered against stored transaction times are now refused rather than compared wrongly: `20260101` matched nothing at all, `2026-01-01 14:30` silently ignored the time of day, and a time-of-day bound could not be compared reliably at all, since stored times carry a fractional part whose width varies. `monzo_sync`'s `since` is unchanged and still takes a datetime, because it is sent to the Monzo API rather than compared against stored text.
+
+### Changed
+
+- `account_type` accepts only `personal` or `joint`, and the two values are declared in each tool's schema rather than checked inside it. A caller sending anything else now gets a validation error naming the accepted values, where `monzo_get_balance` and `monzo_list_pots` previously returned `{"error": ...}` and the other four accepted it silently. The check was a helper that had to be called at each site and was called at two of six; declaring it leaves nothing for a tool to forget.
+- `monzo_mcp.helpers.validate_account_type` and `VALID_ACCOUNT_TYPES` are gone, replaced by the `AccountType` annotation the schema is built from.
+- `monzo_mcp.errors` adds `InvalidDateError`. Like the other errors this package raises deliberately, its message reaches the model rather than being replaced by the tool name.
+
 ## [0.8.0] - 2026-08-31
 
 ### Security
@@ -125,7 +139,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Transaction search across merchant name, description, and notes.
 - Pre-commit hook (`scripts/check-no-data.sh`) blocking commit of databases, tokens, and other secrets.
 
-[Unreleased]: https://github.com/partymola/monzo-mcp/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/partymola/monzo-mcp/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/partymola/monzo-mcp/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/partymola/monzo-mcp/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/partymola/monzo-mcp/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/partymola/monzo-mcp/compare/v0.6.0...v0.6.1

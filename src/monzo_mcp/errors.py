@@ -29,3 +29,7 @@ class AccountNotFound(MonzoError, ValueError):
     Keeps `ValueError`, which is what it raised before, so a caller catching
     that still does.
     """
+
+
+class InvalidDateError(MonzoError, ValueError):
+    """A date or month argument a tool will not query with."""

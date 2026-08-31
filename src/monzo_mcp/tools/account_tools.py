@@ -8,10 +8,10 @@ from .. import api
 from ..db import get_db, save_balance
 from ..errors import AccountNotFound
 from ..helpers import (
+    AccountType,
     format_response,
     pence_to_pounds,
     require_auth,
-    validate_account_type,
 )
 from ..mcp_instance import mcp
 
@@ -67,7 +67,7 @@ async def monzo_list_accounts() -> str:
 
 @mcp.tool()
 @require_auth
-async def monzo_get_balance(account_type: str = "personal") -> str:
+async def monzo_get_balance(account_type: AccountType = "personal") -> str:
     """Get current balance for a Monzo account.
 
     Args:
@@ -75,9 +75,6 @@ async def monzo_get_balance(account_type: str = "personal") -> str:
 
     Returns balance, spend today, and currency. Also records a balance snapshot.
     """
-    err = validate_account_type(account_type)
-    if err:
-        return format_response({"error": err})
 
     def _fetch():
         acct_id, atype = _resolve_account_id(account_type)
@@ -107,7 +104,7 @@ async def monzo_get_balance(account_type: str = "personal") -> str:
 
 @mcp.tool()
 @require_auth
-async def monzo_list_pots(account_type: str = "personal") -> str:
+async def monzo_list_pots(account_type: AccountType = "personal") -> str:
     """List all pots (savings buckets) for a Monzo account.
 
     Args:
@@ -116,9 +113,6 @@ async def monzo_list_pots(account_type: str = "personal") -> str:
     Returns the account the pots belong to, plus pot names and balances.
     Also records balance snapshots.
     """
-    err = validate_account_type(account_type)
-    if err:
-        return format_response({"error": err})
 
     def _fetch():
         acct_id, atype = _resolve_account_id(account_type)

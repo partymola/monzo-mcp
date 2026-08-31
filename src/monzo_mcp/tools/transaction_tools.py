@@ -8,7 +8,7 @@ import anyio
 from .. import api
 from ..api import MonzoAPIError, MonzoSCAError
 from ..db import get_db, get_last_sync_attempt, log_sync, save_balance
-from ..helpers import format_response, pence_to_pounds, require_auth
+from ..helpers import AccountType, format_response, parse_day, pence_to_pounds, require_auth
 from ..mcp_instance import mcp
 
 logger = logging.getLogger(__name__)
@@ -307,7 +307,7 @@ def auto_sync_if_stale() -> None:
 
 @mcp.tool()
 @require_auth
-async def monzo_sync(account_type: str | None = None, since: str | None = None) -> str:
+async def monzo_sync(account_type: AccountType | None = None, since: str | None = None) -> str:
     """Sync transactions, balances, and pots from the Monzo API into the local cache.
 
     Fetches up to 11 months of history (within SCA window) or falls back to
@@ -327,7 +327,7 @@ async def monzo_sync(account_type: str | None = None, since: str | None = None) 
 @mcp.tool()
 @require_auth
 async def monzo_list_transactions(
-    account_type: str | None = None,
+    account_type: AccountType | None = None,
     since: str | None = None,
     before: str | None = None,
     category: str | None = None,
@@ -347,12 +347,16 @@ async def monzo_list_transactions(
 
     Args:
         account_type: "personal" or "joint" (default: all)
-        since: Start date in ISO format, e.g. "2026-01-01" (inclusive)
-        before: End date in ISO format, e.g. "2026-02-01" (exclusive)
+        since: Start date, e.g. "2026-01-01" (inclusive)
+        before: End date, e.g. "2026-02-01" (exclusive)
         category: Exact category match, e.g. "groceries", "eating_out", "transport"
         merchant: Merchant name search (case-insensitive, partial match)
         limit: Max results (default 50)
     """
+    if since is not None:
+        since = parse_day(since, "since")
+    if before is not None:
+        before = parse_day(before, "before")
 
     def _query():
         auto_sync_if_stale()
@@ -411,7 +415,7 @@ async def monzo_list_transactions(
 @require_auth
 async def monzo_search_transactions(
     query: str,
-    account_type: str | None = None,
+    account_type: AccountType | None = None,
     since: str | None = None,
     before: str | None = None,
     limit: int = 30,
@@ -430,10 +434,14 @@ async def monzo_search_transactions(
     Args:
         query: Search term
         account_type: "personal" or "joint" (default: all)
-        since: Start date in ISO format (inclusive)
-        before: End date in ISO format (exclusive)
+        since: Start date, e.g. "2026-01-01" (inclusive)
+        before: End date, e.g. "2026-02-01" (exclusive)
         limit: Max results (default 30)
     """
+    if since is not None:
+        since = parse_day(since, "since")
+    if before is not None:
+        before = parse_day(before, "before")
 
     def _query_db():
         auto_sync_if_stale()
