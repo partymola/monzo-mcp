@@ -8,6 +8,8 @@ notice patch their own paths anyway.
 """
 
 import ast
+import importlib
+import pkgutil
 import urllib.request
 from pathlib import Path
 
@@ -15,6 +17,7 @@ import pytest
 
 import monzo_mcp
 from monzo_mcp import auth, config, db, helpers
+from monzo_mcp.errors import MonzoError
 
 
 def test_the_suite_cannot_reach_the_network():
@@ -101,6 +104,67 @@ def test_only_the_expected_modules_hold_a_config_path():
 
     assert holders == expected, (
         f"a module binds a config path at import that the harness does not patch: {holders}"
+    )
+
+
+#: Exceptions deliberately left for `mcp` to mask, named so that leaving the
+#: base off stays a decision rather than an omission. Fully qualified, or an
+#: entry would exempt that bare name in every module at once. Empty today:
+#: every exception class this package defines is written for the model to read.
+_NOT_MODEL_FACING: frozenset[str] = frozenset()
+
+
+def test_every_exception_this_package_defines_reaches_the_model():
+    """Which exceptions keep their message on the wire is not observable here.
+
+    `require_auth` turns a `MonzoError` into the `ToolError` whose text `mcp`
+    2.1 keeps; everything else arrives as a bare "Error executing tool <name>".
+    A new exception class that forgets the base raises fine, is caught fine,
+    and every behavioural test on it passes, because the conversion happens a
+    layer above the one those tests call.
+
+    Keyed by module and name, or a conforming class in a later-walked module
+    hides a broken one of the same name. Seeded with the package module,
+    because `walk_packages` yields what is inside the directory and never
+    `__init__.py`. Both are pinned by mutants. `onerror` is not, and cannot be
+    while `tools` is the only subpackage: the loop imports it directly before
+    the walk would recurse into it. It guards a nested subpackage this layout
+    does not have yet.
+
+    It sees classes this package defines, not raise sites: a bare
+    `RuntimeError` or `ValueError` raised here is masked and nothing reports
+    it.
+    """
+    package = Path(monzo_mcp.__file__).parent
+    modules = [monzo_mcp]
+    for info in pkgutil.walk_packages(
+        [str(package)],
+        f"{monzo_mcp.__name__}.",
+        onerror=lambda name: pytest.fail(f"{name} could not be imported, so it went unchecked"),
+    ):
+        modules.append(importlib.import_module(info.name))
+
+    found = {}
+    for module in modules:
+        for name, obj in vars(module).items():
+            # Defined here, not imported into here: every module that raises
+            # one of these also imports it.
+            if (
+                isinstance(obj, type)
+                and issubclass(obj, Exception)
+                and obj.__module__ == module.__name__
+            ):
+                found[f"{module.__name__}.{name}"] = obj
+
+    assert found, "no exception class found: the package layout has moved"
+    stragglers = sorted(
+        name
+        for name, obj in found.items()
+        if name not in _NOT_MODEL_FACING and not issubclass(obj, MonzoError)
+    )
+    assert not stragglers, (
+        f"raised with a message the model will never see: {stragglers}. Subclass "
+        "MonzoError, or name it in _NOT_MODEL_FACING and say why"
     )
 
 

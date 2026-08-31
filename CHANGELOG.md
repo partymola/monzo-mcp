@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- `mcp` 2.1.1, up from 2.0.0. That release keeps a `ToolError`'s text and replaces every other exception's with `Error executing tool <name>`, which on its own would have left a tool answering an expired token, an SCA prompt or a missing account with nothing but that line. The errors this package raises as its own types now travel as `ToolError`, so a caller still gets the text that says what to do. Anything unplanned keeps the new behaviour and stays in the server's log, which is where a Monzo error body and the absolute path in a socket failure belong.
+- `MonzoAuthError`, `MonzoSCAError`, `MonzoAPIError`, `TokenRefused` and `RefreshNetworkError` now share a `MonzoError` base, exported from the new `monzo_mcp.errors` alongside `AccountNotFound`. Each keeps the base it had, so `except ValueError` and `except RuntimeError` still catch what they caught.
+
 ## [0.7.0] - 2026-08-21
 
 ### Fixed

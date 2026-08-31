@@ -8,19 +8,20 @@ import urllib.request
 
 from .auth import RefreshNetworkError, TokenRefused, refresh_token
 from .config import MONZO_API_BASE
+from .errors import MonzoError
 
 logger = logging.getLogger(__name__)
 
 
-class MonzoAuthError(Exception):
+class MonzoAuthError(MonzoError):
     """Token expired or invalid, re-auth needed."""
 
 
-class MonzoSCAError(Exception):
+class MonzoSCAError(MonzoError):
     """Strong Customer Authentication required (outside SCA window)."""
 
 
-class MonzoAPIError(Exception):
+class MonzoAPIError(MonzoError):
     """General API error."""
 
 

@@ -6,6 +6,7 @@ import anyio
 
 from .. import api
 from ..db import get_db, save_balance
+from ..errors import AccountNotFound
 from ..helpers import (
     format_response,
     pence_to_pounds,
@@ -38,7 +39,7 @@ def _resolve_account_id(account_type: str) -> tuple[str, str]:
         atype = "joint" if acct.get("type") == "uk_retail_joint" else "personal"
         if atype == account_type:
             return acct["id"], atype
-    raise ValueError(f"No open {account_type} account found")
+    raise AccountNotFound(f"No open {account_type} account found")
 
 
 @mcp.tool()
