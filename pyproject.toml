@@ -23,7 +23,7 @@ classifiers = [
 # reached installs unannounced and broke them. Bump deliberately, never by
 # widening a spec.
 dependencies = [
-    "mcp==2.0.0",
+    "mcp==2.1.1",
 ]
 
 [project.optional-dependencies]
