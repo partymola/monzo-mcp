@@ -4,6 +4,7 @@ import http.client
 import json
 import logging
 import os
+import secrets
 import socket
 import sys
 import urllib.error
@@ -238,7 +239,7 @@ def setup_auth():
         _save_json(MONZO_CLIENT_PATH, creds)
         print("Credentials saved.")
 
-    state = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    state = secrets.token_urlsafe(32)
     redirect_uri = f"http://localhost:{MONZO_CALLBACK_PORT}/callback"
     auth_url = (
         MONZO_AUTH_URL
@@ -259,6 +260,18 @@ def setup_auth():
         def do_GET(self):
             nonlocal auth_code
             qs = parse_qs(urlparse(self.path).query)
+            # Before the code is read, not after: a mismatch must not spend the
+            # code it arrived with, even though nothing would be stored.
+            #
+            # Encoded, because compare_digest refuses a non-ASCII str and both
+            # routes in reach one: parse_qs decodes percent-escapes with
+            # errors="replace", and http.server reads the request line as
+            # iso-8859-1. Comparing str crashes the handler on `state=%80`.
+            if not secrets.compare_digest(qs.get("state", [""])[0].encode(), state.encode()):
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b"State did not match the request that started this flow.")
+                return
             if "code" in qs:
                 auth_code = qs["code"][0]
                 self.send_response(200)

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- `monzo-mcp auth` now checks the OAuth `state` on the callback, and generates one that cannot be guessed. The callback listener is an unauthenticated endpoint on localhost, so while `auth` was waiting any process on the machine could deliver its own authorisation code: that code was exchanged and the resulting tokens written to the token file, leaving the server reading someone else's Monzo account. A callback whose `state` does not match the request that started the flow is now refused before the code is read, so it is not exchanged either. The `state` itself was a UTC timestamp, guessable to the second, and is now 32 random bytes.
+
 ### Changed
 
 - `mcp` 2.1.1, up from 2.0.0. That release keeps a `ToolError`'s text and replaces every other exception's with `Error executing tool <name>`, which on its own would have left a tool answering an expired token, an SCA prompt or a missing account with nothing but that line. The errors this package raises as its own types now travel as `ToolError`, so a caller still gets the text that says what to do. Anything unplanned keeps the new behaviour and stays in the server's log, which is where the absolute path in a failure to read the token file or the cache belongs.

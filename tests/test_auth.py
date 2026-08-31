@@ -21,7 +21,7 @@ from datetime import datetime
 from io import StringIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlparse
 
 from monzo_mcp import auth
 
@@ -357,12 +357,19 @@ class _FakeConfigDir:
         pass
 
 
-def _server_factory(callback_path, recorded, bound=None):
+def _server_factory(callback_path, recorded, bound=None, sent_state=None):
     """Return an HTTPServer stand-in that drives the callback handler once.
 
     `bound` collects the address tuple. What the server binds to is the whole
     of what makes the callback reachable from a published container port, and
     nothing the handler does afterwards reveals it.
+
+    `callback_path` may carry a `{state}` placeholder, filled with the state
+    the code actually put in the authorisation URL. Hard-coding it instead
+    would let the URL and the comparison drift apart: sending one state and
+    checking another breaks every real auth while every test still passes,
+    because a test that supplies both ends never exercises the tie between
+    them.
     """
 
     class _FakeServer:
@@ -373,7 +380,20 @@ def _server_factory(callback_path, recorded, bound=None):
 
         def handle_request(self):
             h = self._handler_cls.__new__(self._handler_cls)
-            h.path = callback_path
+            # Filled from the same run, which is the whole point: a near-miss
+            # built from a previous run's state is just a different random
+            # value, and a comparison looking at one character would refuse it
+            # for the wrong reason.
+            sent = sent_state[0] if sent_state else ""
+            path = callback_path
+            for token, value in (
+                ("{state}", sent),
+                ("{state_without_last}", sent[:-1]),
+                ("{state_swapped_case}", sent.swapcase()),
+            ):
+                if token in path:
+                    path = path.replace(token, value)
+            h.path = path
             h.wfile = io.BytesIO()
             h.send_response = lambda code, *a, **k: recorded.append(code)
             h.send_header = lambda *a, **k: None
@@ -387,13 +407,14 @@ def _server_factory(callback_path, recorded, bound=None):
 
 
 class _SetupResult:
-    def __init__(self, saved, recorded, token_req, stdout, exit_code, bound=None):
+    def __init__(self, saved, recorded, token_req, stdout, exit_code, bound=None, state=None):
         self.saved = saved  # {path: data}
         self.recorded = recorded  # HTTP response codes the handler emitted
         self.token_req = token_req  # the code-exchange Request, or None
         self.stdout = stdout
         self.exit_code = exit_code  # None on success, else the sys.exit code
         self.bound = bound or []  # (host, port) tuples the server bound to
+        self.state = state  # the state the authorisation URL actually carried
 
 
 def _run_setup(
@@ -432,6 +453,14 @@ def _run_setup(
             raise token_raises
         return _FakeResp(token_response)
 
+    # Filled from the authorisation URL the code builds, and fed back to the
+    # callback. Nothing here stubs the state: a stand-in would let the URL and
+    # the comparison disagree without any test noticing.
+    sent_state = []
+
+    def fake_browser_open(url):
+        sent_state.append(parse_qs(urlparse(url).query).get("state", [""])[0])
+
     out = StringIO()
     with (
         patch.object(auth, "CONFIG_DIR", _FakeConfigDir()),
@@ -440,11 +469,15 @@ def _run_setup(
         patch.object(auth, "datetime", _FixedDatetime),
         patch.object(auth, "_save_json", fake_save),
         patch.object(auth, "_load_json", fake_load),
-        patch.object(auth, "webbrowser"),
+        patch.object(auth.webbrowser, "open", fake_browser_open),
         # The name setup_auth actually constructs. Patching HTTPServer instead
         # binds a real socket on every one of these tests while still looking
         # like it is driving a stand-in.
-        patch.object(auth, "_CallbackServer", _server_factory(callback_path, recorded, bound)),
+        patch.object(
+            auth,
+            "_CallbackServer",
+            _server_factory(callback_path, recorded, bound, sent_state),
+        ),
         patch("urllib.request.urlopen", fake_urlopen),
         patch("builtins.input", side_effect=inputs),
         patch.object(sys, "stdout", out),
@@ -455,8 +488,127 @@ def _run_setup(
         except SystemExit as e:
             exit_code = e.code
 
-    result = _SetupResult(saved, recorded, box["token_req"], out.getvalue(), exit_code, bound)
+    result = _SetupResult(
+        saved,
+        recorded,
+        box["token_req"],
+        out.getvalue(),
+        exit_code,
+        bound,
+        sent_state[0] if sent_state else None,
+    )
     return result, client_path, tokens_path
+
+
+class TestTheCallbackStateIsChecked(unittest.TestCase):
+    """The callback is an unauthenticated local endpoint.
+
+    Anything on the machine can reach `localhost:6600/callback` while `auth` is
+    waiting, so a request arriving with someone else's authorisation code would be
+    exchanged and written to the token file - and the account the server then
+    reads is theirs, not the user's. `state` is what ties the callback to the
+    request that started it, so it has to be both unguessable and compared.
+    """
+
+    def test_a_callback_with_the_wrong_state_saves_no_token(self):
+        result, _client_path, tokens_path = _run_setup(
+            client_exists=True,
+            inputs=["y"],
+            callback_path="/callback?code=attacker_code&state=not_the_one",
+            token_response={"access_token": "at", "refresh_token": "rt", "expires_in": 3600},
+            existing_creds=CREDS,
+        )
+        self.assertNotIn(tokens_path, result.saved)
+        # And the code was never exchanged: the refusal has to come before the
+        # POST, or the attacker's code is spent even though nothing is stored.
+        self.assertIsNone(result.token_req)
+        # Refused rather than acknowledged. Checking the state after reading the
+        # code stores nothing either, so the two assertions above both pass on
+        # it - and it answers the caller 200 "Auth complete".
+        self.assertEqual(result.recorded, [400])
+
+    def test_a_callback_with_no_state_saves_no_token(self):
+        result, _client_path, tokens_path = _run_setup(
+            client_exists=True,
+            inputs=["y"],
+            callback_path="/callback?code=attacker_code",
+            token_response={"access_token": "at", "refresh_token": "rt", "expires_in": 3600},
+            existing_creds=CREDS,
+        )
+        self.assertNotIn(tokens_path, result.saved)
+        self.assertIsNone(result.token_req)
+        self.assertEqual(result.recorded, [400])
+
+    def _completed_run(self):
+        return _run_setup(
+            client_exists=True,
+            inputs=["y"],
+            callback_path="/callback?code=AC&state={state}",
+            token_response={"access_token": "at", "refresh_token": "rt", "expires_in": 3600},
+            existing_creds=CREDS,
+        )[0]
+
+    def test_the_state_in_the_url_is_unguessable(self):
+        """Asserted on the value the flow actually sent, not on the stdlib.
+
+        Reading `secrets.token_urlsafe` back in a test proves a property of
+        Python. What has to hold is that the URL carries something long, not
+        derived from the clock, and different every run - the timestamp this
+        replaced satisfied none of those and would still have been compared.
+        """
+        runs = [self._completed_run(), self._completed_run()]
+        self.assertNotEqual(runs[0].state, runs[1].state)
+        for run in runs:
+            self.assertGreaterEqual(len(run.state), 32, run.state)
+            self.assertFalse(run.state.isdigit(), run.state)
+            # The printed URL is the other way the user receives it, and the
+            # only one on a headless or container run where webbrowser opens
+            # nothing. Untied, it can carry a state the listener will refuse.
+            self.assertIn(run.state, run.stdout)
+
+    def test_a_state_missing_its_last_character_is_refused(self):
+        """A near miss from the same run, which is what makes it one.
+
+        Built from a previous run's state it would just be another random
+        value, and a comparison reading only the first character would refuse
+        it for the wrong reason while still passing.
+        """
+        result, _client_path, tokens_path = _run_setup(
+            client_exists=True,
+            inputs=["y"],
+            callback_path="/callback?code=AC&state={state_without_last}",
+            token_response={"access_token": "at", "refresh_token": "rt", "expires_in": 3600},
+            existing_creds=CREDS,
+        )
+        self.assertNotIn(tokens_path, result.saved)
+        self.assertEqual(result.recorded, [400])
+
+    def test_a_state_differing_only_in_case_is_refused(self):
+        result, _client_path, tokens_path = _run_setup(
+            client_exists=True,
+            inputs=["y"],
+            callback_path="/callback?code=AC&state={state_swapped_case}",
+            token_response={"access_token": "at", "refresh_token": "rt", "expires_in": 3600},
+            existing_creds=CREDS,
+        )
+        self.assertNotIn(tokens_path, result.saved)
+        self.assertEqual(result.recorded, [400])
+
+    def test_a_non_ascii_state_is_refused_rather_than_crashing(self):
+        """`compare_digest` rejects a non-ASCII `str`, and both routes in reach
+        one: `parse_qs` decodes percent-escapes, and `http.server` reads the
+        request line as iso-8859-1. Compared as `str` this raises inside the
+        handler, so the caller gets a dropped connection and the user a
+        traceback."""
+        result, _client_path, tokens_path = _run_setup(
+            client_exists=True,
+            inputs=["y"],
+            callback_path="/callback?code=AC&state=%80",
+            token_response={"access_token": "at", "refresh_token": "rt", "expires_in": 3600},
+            existing_creds=CREDS,
+        )
+        self.assertNotIn(tokens_path, result.saved)
+        self.assertEqual(result.recorded, [400])
 
 
 class TestSetupAuth(unittest.TestCase):
@@ -464,7 +616,7 @@ class TestSetupAuth(unittest.TestCase):
         result, client_path, tokens_path = _run_setup(
             client_exists=False,
             inputs=["new_client", "new_secret"],
-            callback_path="/callback?code=auth_code_xyz&state=s",
+            callback_path="/callback?code=auth_code_xyz&state={state}",
             token_response={
                 "access_token": "at_1",
                 "refresh_token": "rt_1",
@@ -498,7 +650,7 @@ class TestSetupAuth(unittest.TestCase):
         result, client_path, tokens_path = _run_setup(
             client_exists=True,
             inputs=[""],  # accept "Re-use existing credentials? [Y/n]" default
-            callback_path="/callback?code=code_reuse&state=s",
+            callback_path="/callback?code=code_reuse&state={state}",
             token_response={"access_token": "at_2", "refresh_token": "rt_2", "expires_in": 3600},
             existing_creds=CREDS,
         )
@@ -514,7 +666,7 @@ class TestSetupAuth(unittest.TestCase):
         result, client_path, _tokens_path = _run_setup(
             client_exists=True,
             inputs=["n", "fresh_client", "fresh_secret"],
-            callback_path="/callback?code=code_new&state=s",
+            callback_path="/callback?code=code_new&state={state}",
             token_response={"access_token": "at_3", "refresh_token": "rt_3", "expires_in": 3600},
             existing_creds=CREDS,
         )
@@ -716,7 +868,7 @@ class TestWhereTheCallbackServerBinds(unittest.TestCase):
         result, _, _ = _run_setup(
             client_exists=False,
             inputs=["cid", "csec"],
-            callback_path="/callback?code=AC&state=20260310120000",
+            callback_path="/callback?code=AC&state={state}",
             token_response={"access_token": "at", "refresh_token": "rt", "expires_in": 21600},
         )
         self.assertEqual(result.bound, [(auth.MONZO_CALLBACK_HOST, auth.MONZO_CALLBACK_PORT)])
@@ -728,7 +880,7 @@ class TestWhereTheCallbackServerBinds(unittest.TestCase):
             result, _, _ = _run_setup(
                 client_exists=False,
                 inputs=["cid", "csec"],
-                callback_path="/callback?code=AC&state=20260310120000",
+                callback_path="/callback?code=AC&state={state}",
                 token_response={"access_token": "at", "refresh_token": "rt", "expires_in": 21600},
             )
         self.assertEqual(result.bound, [("0.0.0.0", auth.MONZO_CALLBACK_PORT)])
@@ -741,7 +893,7 @@ class TestWhereTheCallbackServerBinds(unittest.TestCase):
             result, _, _ = _run_setup(
                 client_exists=False,
                 inputs=["cid", "csec"],
-                callback_path="/callback?code=AC&state=20260310120000",
+                callback_path="/callback?code=AC&state={state}",
                 token_response={"access_token": "at", "refresh_token": "rt", "expires_in": 21600},
             )
         expected = f"http://localhost:{auth.MONZO_CALLBACK_PORT}/callback"
