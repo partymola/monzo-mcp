@@ -11,8 +11,9 @@ class MonzoError(Exception):
     `require_auth` converts these into `ToolError`, whose message `mcp` keeps
     on the wire; every other exception reaches the client as `Error executing
     tool <name>`. Anything not descended from this is treated as unplanned,
-    and its text is what must not travel: a socket failure names an absolute
-    path, and a Monzo error body can carry account-specific data.
+    and its text is what must not travel: a filesystem error on the token file
+    or the cache names an absolute path, which is measured rather than assumed
+    and is what the masking test raises.
 
     Membership is not a promise about the message. What each raise site may
     say is governed by the Data Safety Rules in AGENTS.md. `TokenRefused`

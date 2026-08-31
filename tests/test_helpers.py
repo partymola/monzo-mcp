@@ -83,8 +83,9 @@ class TestWhichErrorsAreExplainedToTheModel:
     @patch("monzo_mcp.helpers.MONZO_CLIENT_PATH")
     @patch("monzo_mcp.helpers.MONZO_TOKENS_PATH")
     def test_an_unplanned_error_is_left_to_be_masked(self, tokens_path, client_path, unplanned):
-        # A Monzo error body can quote account-specific data and a socket error
-        # names a path. Converting everything would put both on the wire.
+        # The OSError is the measured case: a failure to read the token file or
+        # the cache names an absolute path. Converting everything puts it on
+        # the wire.
         client_path.exists.return_value = True
         tokens_path.exists.return_value = True
 
