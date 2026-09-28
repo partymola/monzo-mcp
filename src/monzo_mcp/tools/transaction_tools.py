@@ -63,8 +63,9 @@ def run_sync(account_type: str | None = None, since: str | None = None) -> dict:
         since: Optional ISO date ("2026-01-01") or datetime ("2026-01-01T14:30:00Z")
             to start the backfill from, overriding last-sync resumption. Reaching
             beyond ~90 days only works inside the post-auth SCA window; outside it
-            the API's 90-day fallback still applies (the value is passed straight to
-            the Monzo API, not gated client-side).
+            the request is refused and sync falls back to the newest cached
+            transaction (the value is passed straight to the Monzo API, not gated
+            client-side).
     """
     since_override = None
     if since is not None:
@@ -249,6 +250,7 @@ def run_sync(account_type: str | None = None, since: str | None = None) -> dict:
                     AND ABS(JULIANDAY(a.created) - JULIANDAY(b.created)) < 0.01
                 WHERE a.merchant_name IS NOT NULL
                 AND (a.settled = '' OR a.settled IS NULL)
+                AND b.settled != ''
             )
         """).rowcount
         if dupes:

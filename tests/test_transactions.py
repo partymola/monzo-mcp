@@ -236,6 +236,35 @@ class TestAuthHoldDedup(unittest.TestCase):
         }
         self.assertEqual(remaining, {"far_hold", "far_settled"})
 
+    def test_unsettled_rows_are_kept_without_a_settled_twin(self):
+        # Two genuine purchases at the same price minutes apart, neither settled
+        # yet: neither is a hold for the other. NULL settled counts as pending.
+        for settled in ("", None):
+            with self.subTest(settled=settled):
+                page = [
+                    _mk("first", amount=-1500, created="2026-02-01T10:00:00Z", settled=""),
+                    _mk("second", amount=-1500, created="2026-02-01T10:00:19Z", settled=settled),
+                ]
+
+                def txns_for(acct, since, n, page=page):
+                    if since is None or not since.startswith("tx_"):
+                        return page
+                    return []
+
+                holder, get_db = self._shared_named(f"both_unsettled_{settled!r}")
+                fake = _FakeApi([{"id": "acc_1", "type": "uk_retail"}], txns_for)
+                with (
+                    patch.object(transaction_tools.api, "get", fake.get),
+                    patch.object(transaction_tools, "get_db", get_db),
+                ):
+                    result = transaction_tools.run_sync()
+
+                self.assertEqual(result["duplicates_removed"], 0)
+                remaining = {
+                    r["id"] for r in holder.execute("SELECT id FROM monzo_transactions").fetchall()
+                }
+                self.assertEqual(remaining, {"first", "second"})
+
 
 class TestCounterpartySync(unittest.TestCase):
     def test_counterparty_persisted_for_transfers_and_null_for_cards(self):

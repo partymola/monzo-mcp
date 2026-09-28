@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- A pending card payment is no longer deleted from the cache when another pending transaction matches it. The auth-hold cleanup after each sync was meant to remove a pending row only when its settled twin had arrived, but it removed any pending row with a match, so two pending rows at the same merchant for the same amount a few minutes apart deleted each other. A card payment retried seconds after a failed attempt looks exactly like that, and the payment that went through vanished from every tool. A routine sync fetches only from the newest cached transaction, so once a later one arrived the lost payment stayed lost. Two pending rows are now both kept. To restore one deleted by an earlier version, run `monzo_sync` with `since` set to a date before it. Within the last 90 days that works at any time; further back it needs the window just after approving access in the Monzo app, and a request refused outside it looks like an ordinary sync.
+
 ## [0.9.0] - 2026-08-31
 
 ### Fixed
