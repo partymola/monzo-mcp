@@ -484,6 +484,93 @@ class TestAccountSelection(unittest.TestCase):
         result = _run(fake, _make_db())
         self.assertEqual(result["error"], "No Monzo accounts found")
 
+    def test_only_current_and_joint_accounts_are_synced(self):
+        # A rewards account pays its balance out to the current account, so
+        # its cached rows go, open or closed. Another type's cached history is
+        # kept: beyond the API's reach it could not be fetched again.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = pathlib.Path(tmp.name) / "monzo.db"
+        db_conn = sqlite3.connect(db_path)
+        self.addCleanup(db_conn.close)
+        db_conn.executescript(SCHEMA)
+        for txn_id, account_id, account_type in (
+            ("cached_rewards", "acc_rewards", "personal"),
+            ("cached_closed_rewards", "acc_old_rewards", "personal"),
+            ("cached_business", "acc_business", "personal"),
+            ("cached_ok", "acc_p", "personal"),
+            ("cached_joint", "acc_j", "joint"),
+        ):
+            db_conn.execute(
+                "INSERT INTO monzo_transactions (id, account_id, account_type, created, amount) "
+                "VALUES (?, ?, ?, '2026-01-01T10:00:00Z', -100)",
+                (txn_id, account_id, account_type),
+            )
+        db_conn.commit()
+
+        accounts = [
+            {"id": "acc_p", "type": "uk_retail"},
+            {"id": "acc_rewards", "type": "uk_rewards"},
+            {"id": "acc_old_rewards", "type": "uk_rewards", "closed": True},
+            {"id": "acc_business", "type": "uk_business"},
+        ]
+        fake = _FakeApi(accounts, self._txns_one_each())
+        with (
+            patch.object(transaction_tools.api, "get", fake.get),
+            patch.object(transaction_tools, "get_db", return_value=db_conn),
+        ):
+            result = transaction_tools.run_sync()
+
+        self.assertEqual(result["accounts_synced"], 1)
+        self.assertIn({"skipped_account_type": "uk_rewards"}, result["details"])
+        self.assertIn({"skipped_account_type": "uk_business"}, result["details"])
+        for skipped in ("acc_rewards", "acc_business"):
+            self.assertEqual(fake.balance_calls_for(skipped), [])
+            self.assertEqual(fake.txn_calls_for(skipped), [])
+        reopened = sqlite3.connect(db_path)
+        self.addCleanup(reopened.close)
+        ids = {r[0] for r in reopened.execute("SELECT id FROM monzo_transactions")}
+        self.assertEqual(ids, {"cached_business", "cached_ok", "cached_joint", "tx_acc_p"})
+
+    def test_each_account_resumes_from_its_own_newest_row(self):
+        # Outside the SCA window a sync resumes from the newest cached row.
+        # Rows kept from a skipped account still carry `personal`, so resuming
+        # per account type would skip what lies between.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = pathlib.Path(tmp.name) / "monzo.db"
+        db_conn = sqlite3.connect(db_path)
+        self.addCleanup(db_conn.close)
+        db_conn.executescript(SCHEMA)
+        for txn_id, account_id, created in (
+            ("old_ok", "acc_p", "2026-01-01T10:00:00Z"),
+            ("new_business", "acc_business", "2026-03-01T10:00:00Z"),
+        ):
+            db_conn.execute(
+                "INSERT INTO monzo_transactions (id, account_id, account_type, created, amount) "
+                "VALUES (?, ?, 'personal', ?, -100)",
+                (txn_id, account_id, created),
+            )
+        db_conn.commit()
+
+        def txns_for(acct, since, n):
+            if n == 1:
+                raise MonzoSCAError("SCA required")
+            return []
+
+        accounts = [
+            {"id": "acc_p", "type": "uk_retail"},
+            {"id": "acc_business", "type": "uk_business"},
+        ]
+        fake = _FakeApi(accounts, txns_for)
+        with (
+            patch.object(transaction_tools.api, "get", fake.get),
+            patch.object(transaction_tools, "get_db", return_value=db_conn),
+        ):
+            transaction_tools.run_sync()
+
+        self.assertIn("since=2026-01-01T10:00:00Z", fake.txn_calls_for("acc_p")[-1])
+
 
 class TestAnUnreadableResponseIsNotAnSCAPrompt(unittest.TestCase):
     """Only an SCA refusal earns the SCA note, and a failed sync is not "ok".

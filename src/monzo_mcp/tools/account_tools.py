@@ -8,6 +8,7 @@ from .. import api
 from ..db import get_db, save_balance
 from ..errors import AccountNotFound
 from ..helpers import (
+    ACCOUNT_TYPES,
     AccountType,
     format_response,
     pence_to_pounds,
@@ -36,9 +37,8 @@ def _resolve_account_id(account_type: str) -> tuple[str, str]:
     for acct in _get_accounts():
         if acct.get("closed"):
             continue
-        atype = "joint" if acct.get("type") == "uk_retail_joint" else "personal"
-        if atype == account_type:
-            return acct["id"], atype
+        if ACCOUNT_TYPES.get(acct.get("type")) == account_type:
+            return acct["id"], account_type
     raise AccountNotFound(f"No open {account_type} account found")
 
 
@@ -48,16 +48,16 @@ async def monzo_list_accounts() -> str:
     """List all Monzo accounts with their types and IDs.
 
     Returns account details including whether each is personal or joint,
-    and whether it is open or closed.
+    and whether it is open or closed. Any other kind of account keeps
+    Monzo's own type name (e.g. "uk_rewards") and is not synced.
     """
     data = await anyio.to_thread.run_sync(_get_accounts)
     accounts = []
     for acct in data:
-        atype = "joint" if acct.get("type") == "uk_retail_joint" else "personal"
         accounts.append(
             {
                 "id": acct["id"],
-                "type": atype,
+                "type": ACCOUNT_TYPES.get(acct.get("type"), acct.get("type")),
                 "closed": acct.get("closed", False),
                 "created": acct.get("created"),
             }

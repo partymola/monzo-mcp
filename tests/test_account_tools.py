@@ -1,4 +1,4 @@
-"""Tests for the pot listing tool.
+"""Tests for the account and pot listing tools.
 
 The Monzo API is stubbed, auth checks are satisfied with temp files, and
 balance snapshots are captured instead of written.
@@ -20,7 +20,10 @@ ACCOUNTS = [
     {"id": "acc_joint", "type": "uk_retail_joint", "closed": False},
 ]
 
+REWARDS = {"id": "acc_rewards", "type": "uk_rewards", "closed": False}
+
 POTS = {
+    "acc_rewards": [{"id": "pot_wrong", "name": "Wrong Account", "balance": 100}],
     "acc_personal": [],
     "acc_joint": [
         {"id": "pot_bills", "name": "Bills", "balance": 694224, "currency": "GBP"},
@@ -106,6 +109,23 @@ class TestListPots(unittest.TestCase):
         with self.assertRaises(Exception) as caught:
             asyncio.run(mcp.call_tool("monzo_list_pots", {"account_type": "savings"}))
         self.assertIn("savings", str(caught.exception))
+
+
+class TestOtherAccountTypes(unittest.TestCase):
+    """A login can hold accounts that are neither current nor joint, such as rewards."""
+
+    def test_personal_never_resolves_to_another_account_type(self):
+        with patch(f"{__name__}.ACCOUNTS", [REWARDS, *ACCOUNTS]):
+            result = _call(account_tools.monzo_list_pots, account_type="personal")
+        self.assertEqual(result, {"account_type": "personal", "pots": []})
+
+    def test_listing_names_another_type_as_monzo_does(self):
+        with patch(f"{__name__}.ACCOUNTS", [REWARDS, *ACCOUNTS]):
+            result = _call(account_tools.monzo_list_accounts)
+        self.assertEqual(
+            [(a["id"], a["type"]) for a in result],
+            [("acc_rewards", "uk_rewards"), ("acc_personal", "personal"), ("acc_joint", "joint")],
+        )
 
 
 if __name__ == "__main__":

@@ -8,7 +8,14 @@ import anyio
 from .. import api
 from ..api import MonzoAPIError, MonzoSCAError
 from ..db import get_db, get_last_sync_attempt, log_sync, save_balance
-from ..helpers import AccountType, format_response, parse_day, pence_to_pounds, require_auth
+from ..helpers import (
+    ACCOUNT_TYPES,
+    AccountType,
+    format_response,
+    parse_day,
+    pence_to_pounds,
+    require_auth,
+)
 from ..mcp_instance import mcp
 
 logger = logging.getLogger(__name__)
@@ -59,7 +66,7 @@ def run_sync(account_type: str | None = None, since: str | None = None) -> dict:
     deduplication automatically. Declined card attempts are not stored.
 
     Args:
-        account_type: "personal", "joint", or None to sync all accounts
+        account_type: "personal", "joint", or None to sync both
         since: Optional ISO date ("2026-01-01") or datetime ("2026-01-01T14:30:00Z")
             to start the backfill from, overriding last-sync resumption. Reaching
             beyond ~90 days only works inside the post-auth SCA window; outside it
@@ -94,11 +101,21 @@ def run_sync(account_type: str | None = None, since: str | None = None) -> dict:
         accounts_synced = 0
         sync_details = []
 
+        # A rewards account pays its balance out to the current account, so
+        # rows cached from it double-count as spending. Its own pass, because
+        # the sync loop skips closed accounts and a closed one needs this too.
+        for acct in accounts:
+            if acct.get("type") == "uk_rewards":
+                db.execute("DELETE FROM monzo_transactions WHERE account_id = ?", (acct["id"],))
+
         for acct in accounts:
             if acct.get("closed"):
                 continue
             acct_id = acct["id"]
-            atype = "joint" if acct.get("type") == "uk_retail_joint" else "personal"
+            atype = ACCOUNT_TYPES.get(acct.get("type"))
+            if atype is None:
+                sync_details.append({"skipped_account_type": acct.get("type")})
+                continue
 
             if account_type and atype != account_type:
                 continue
@@ -151,8 +168,8 @@ def run_sync(account_type: str | None = None, since: str | None = None) -> dict:
                 except (MonzoSCAError, MonzoAPIError) as page_error:
                     if page == 0:
                         last_sync = db.execute(
-                            "SELECT MAX(created) FROM monzo_transactions WHERE account_type = ?",
-                            (atype,),
+                            "SELECT MAX(created) FROM monzo_transactions WHERE account_id = ?",
+                            (acct_id,),
                         ).fetchone()[0]
                         fallback = last_sync or (
                             datetime.now(timezone.utc) - timedelta(days=90)
@@ -318,10 +335,11 @@ async def monzo_sync(account_type: AccountType | None = None, since: str | None 
 
     Fetches up to 11 months of history (within SCA window) or falls back to
     the last-synced timestamp / 90 days. Handles pagination and auth-hold
-    deduplication automatically. Declined card attempts are not stored.
+    deduplication automatically. Declined card attempts are not stored. Only
+    current and joint accounts are synced; any other is listed as skipped.
 
     Args:
-        account_type: "personal", "joint", or None to sync all accounts
+        account_type: "personal", "joint", or None to sync both
         since: Optional ISO date ("2026-01-01") or datetime ("2026-01-01T14:30:00Z")
             to start the backfill from, overriding last-sync resumption. Reaching
             beyond ~90 days only works inside the post-auth SCA window.

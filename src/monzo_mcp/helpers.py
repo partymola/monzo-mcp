@@ -28,6 +28,11 @@ def format_response(result: Any) -> str:
 # is what the model reads and what the server validates a call against.
 AccountType = Literal["personal", "joint"]
 
+# Monzo's account `type` for each value above, and the only two the API
+# documents. Any other type (a rewards or business account) is not synced or
+# resolved, rather than being filed as personal.
+ACCOUNT_TYPES = {"uk_retail": "personal", "uk_retail_joint": "joint"}
+
 
 def pence_to_pounds(pence: int) -> float:
     """Convert pence to pounds for display."""
