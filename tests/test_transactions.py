@@ -266,6 +266,99 @@ class TestAuthHoldDedup(unittest.TestCase):
                 self.assertEqual(remaining, {"first", "second"})
 
 
+class TestDeclinedAttemptsAreNotTransactions(unittest.TestCase):
+    """A declined attempt carries a real amount and merchant, so stored it counts as spending."""
+
+    def _sync(self, page, cached=(), txns_for=None):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = pathlib.Path(tmp.name) / "monzo.db"
+        db_conn = sqlite3.connect(db_path)
+        self.addCleanup(db_conn.close)
+        db_conn.row_factory = sqlite3.Row
+        db_conn.executescript(SCHEMA)
+        for txn_id in cached:
+            db_conn.execute(
+                "INSERT INTO monzo_transactions (id, account_id, account_type, created, "
+                "amount, merchant_name, settled) VALUES (?, 'acc_1', 'personal', "
+                "'2026-02-01T10:00:00Z', -1500, 'Coffee Shop', '')",
+                (txn_id,),
+            )
+        db_conn.commit()
+
+        if txns_for is None:
+
+            def txns_for(acct, since, n):
+                if since is None or not since.startswith("tx_"):
+                    return page
+                return []
+
+        fake = _FakeApi([{"id": "acc_1", "type": "uk_retail"}], txns_for)
+        with (
+            patch.object(transaction_tools.api, "get", fake.get),
+            patch.object(transaction_tools, "get_db", return_value=db_conn),
+        ):
+            result = transaction_tools.run_sync()
+
+        reopened = sqlite3.connect(db_path)
+        self.addCleanup(reopened.close)
+        ids = {r[0] for r in reopened.execute("SELECT id FROM monzo_transactions")}
+        return result, ids
+
+    def _declined(self, txn_id, created, reason="INSUFFICIENT_FUNDS"):
+        tx = _mk(txn_id, amount=-1500, created=created, settled="", merchant="Coffee Shop")
+        tx["decline_reason"] = reason
+        return tx
+
+    def test_a_declined_attempt_is_not_stored(self):
+        # The API emits reasons its docs do not list, so any reason counts.
+        for reason in ("INSUFFICIENT_FUNDS", "SCA_NOT_AUTHENTICATED_CARD_NOT_PRESENT", "OTHER"):
+            with self.subTest(reason=reason):
+                page = [
+                    self._declined("declined", "2026-02-01T10:00:00Z", reason),
+                    _mk("paid", amount=-800, created="2026-02-01T11:00:00Z", settled="2026-02-01"),
+                ]
+                result, ids = self._sync(page)
+                self.assertEqual(ids, {"paid"})
+                self.assertEqual(result["transactions_upserted"], 1)
+
+    def test_a_declined_attempt_already_cached_is_removed(self):
+        _, ids = self._sync(
+            [self._declined("declined", "2026-02-01T10:00:00Z")], cached=["declined", "other"]
+        )
+        self.assertEqual(ids, {"other"})
+
+    def test_a_retry_matching_a_declined_attempt_cached_earlier_is_kept(self):
+        # The cached attempt is not re-fetched, so it still reaches the dedup
+        # as an unsettled row matching the retry.
+        retry = _mk(
+            "retry",
+            amount=-1500,
+            created="2026-02-01T10:00:19Z",
+            settled="",
+            merchant="Coffee Shop",
+        )
+        _, ids = self._sync([retry], cached=["declined"])
+        self.assertIn("retry", ids)
+
+    def test_a_declined_last_row_does_not_end_paging(self):
+        # The cursor and the full-page test must see the page as the API sent it.
+        page0 = [
+            _mk(f"tx_{i:03d}", amount=-100, created="2026-02-01T10:00:00Z", settled="s")
+            for i in range(99)
+        ] + [self._declined("tx_099", "2026-02-01T11:00:00Z")]
+        page1 = [_mk("tx_100", amount=-100, created="2026-02-02T10:00:00Z", settled="s")]
+
+        def txns_for(acct, since, n):
+            if since is None or not since.startswith("tx_"):
+                return page0
+            return page1 if since == "tx_099" else []
+
+        _, ids = self._sync(None, txns_for=txns_for)
+        self.assertIn("tx_100", ids)
+        self.assertNotIn("tx_099", ids)
+
+
 class TestCounterpartySync(unittest.TestCase):
     def test_counterparty_persisted_for_transfers_and_null_for_cards(self):
         transfer = _mk("tx_fp", amount=-39900, created="2026-02-01T10:00:00Z", settled="2026-02-01")

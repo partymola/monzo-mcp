@@ -56,7 +56,7 @@ def run_sync(account_type: str | None = None, since: str | None = None) -> dict:
 
     Fetches up to 11 months of history (within SCA window) or falls back to
     the last-synced timestamp / 90 days. Handles pagination and auth-hold
-    deduplication automatically.
+    deduplication automatically. Declined card attempts are not stored.
 
     Args:
         account_type: "personal", "joint", or None to sync all accounts
@@ -184,6 +184,10 @@ def run_sync(account_type: str | None = None, since: str | None = None) -> dict:
                     break
 
                 for tx in txns:
+                    if tx.get("decline_reason"):
+                        db.execute("DELETE FROM monzo_transactions WHERE id = ?", (tx["id"],))
+                        continue
+
                     merchant_name = None
                     if isinstance(tx.get("merchant"), dict):
                         merchant_name = tx["merchant"].get("name")
@@ -314,7 +318,7 @@ async def monzo_sync(account_type: AccountType | None = None, since: str | None 
 
     Fetches up to 11 months of history (within SCA window) or falls back to
     the last-synced timestamp / 90 days. Handles pagination and auth-hold
-    deduplication automatically.
+    deduplication automatically. Declined card attempts are not stored.
 
     Args:
         account_type: "personal", "joint", or None to sync all accounts
