@@ -1,9 +1,11 @@
 """Tests for OAuth token management and interactive setup.
 
 No network and no real OAuth: the HTTP layer (`urllib.request.urlopen`), the
-local callback HTTPServer, `input`, `webbrowser`, and the JSON file I/O are all
-mocked. Time is pinned via a datetime subclass so the 5-minute expiry buffer and
-the stored expiry timestamps are exact, not approximate.
+local callback HTTPServer, `input` and `webbrowser` are mocked. The refresh
+tests read and write fictional credential files in the isolated directory; the
+setup tests mock the file I/O. Where time matters it is pinned via a datetime
+subclass, so the 5-minute expiry buffer and the stored expiry timestamps are
+exact, not approximate.
 """
 
 import ast
@@ -15,6 +17,7 @@ import pathlib
 import socket
 import sys
 import tempfile
+import threading
 import unittest
 import urllib.error
 from datetime import datetime
@@ -24,6 +27,7 @@ from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, quote, urlparse
 
 from monzo_mcp import auth
+from tests.isolated_files import write_credentials, write_isolated
 
 # Fixed "now" so expiry maths is deterministic.
 NOW_TS = 1_700_000_000
@@ -54,19 +58,11 @@ class _FakeResp:
 # refresh_token
 # --------------------------------------------------------------------------- #
 class TestRefreshToken(unittest.TestCase):
-    def tearDown(self):
-        # Belt-and-braces: the module-level token/cred caches are always mutated
-        # inside patch.object here, but reset them so no state can leak to a
-        # future test that forgets to patch (which could read the real files).
-        auth._cached_tokens = None
-        auth._cached_creds = None
-
     def _refresh(self, tokens, *, urlopen=None, creds=CREDS, save_capture=None):
-        """Run refresh_token with the module cache preloaded (no file reads)."""
+        """Run refresh_token against credential files at conftest's isolated paths."""
         saves = save_capture if save_capture is not None else {}
+        write_credentials(tokens, creds)
         stack = [
-            patch.object(auth, "_cached_tokens", dict(tokens)),
-            patch.object(auth, "_cached_creds", dict(creds)),
             patch.object(auth, "datetime", _FixedDatetime),
             patch.object(auth, "_save_json", lambda path, data: saves.update(data)),
         ]
@@ -315,27 +311,209 @@ class TestRefreshToken(unittest.TestCase):
                 urlopen=urlopen,
             )
 
-    def test_tokens_and_creds_lazy_loaded_from_disk_when_cache_empty(self):
-        loaded = []
 
-        def fake_load(path):
-            loaded.append(path)
-            if path is auth.MONZO_TOKENS_PATH:
-                return {"access_token": "disk_tok", "refresh_token": "r1", "expiry": NOW_TS + 999}
-            return dict(CREDS)
+class TestTheTokenFileIsTheOnlyCopy(unittest.TestCase):
+    """`monzo-mcp auth` runs in another process while the server is running.
+
+    Each test writes real files at the paths conftest isolates, because the
+    property is about what is on disk, not about anything this module holds.
+    """
+
+    def setUp(self):
+        write_credentials(creds=CREDS)
+
+    def _write_tokens(self, access_token, expiry, refresh_token="r1"):
+        write_credentials(
+            {"access_token": access_token, "refresh_token": refresh_token, "expiry": expiry}
+        )
+
+    @staticmethod
+    def _rewrite_unnoticeably(path, text):
+        """Same length and mtime as before, so only the content says it changed.
+
+        A cache keyed on size or modification time would serve the old copy;
+        mtime resolution is coarse on some filesystems, so it can miss a real
+        rewrite.
+        """
+        before = path.stat()
+        assert len(path.read_text()) == len(text)
+        write_isolated(path, text)
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+    def test_a_token_written_by_auth_is_used_without_a_restart(self):
+        """Held in memory, the old token keeps failing after `auth` until a
+        restart, and the window for a full-history backfill is the few minutes
+        after approval."""
+        self._write_tokens("token_aaaa", 9_999_999_999)
+        self.assertEqual(auth.refresh_token(), "token_aaaa")
+        self._rewrite_unnoticeably(
+            auth.MONZO_TOKENS_PATH,
+            auth.MONZO_TOKENS_PATH.read_text().replace("token_aaaa", "token_bbbb"),
+        )
+        self.assertEqual(auth.refresh_token(), "token_bbbb")
+
+    def test_a_refresh_does_not_overwrite_a_token_saved_while_it_ran(self):
+        """Saving over it loses the user's new grant, and its SCA window with it.
+
+        The competing grant expires before the refreshed one would, as a real
+        one issued moments earlier does, so a comparison against the refreshed
+        expiry instead of the starting one fails here.
+        """
+        self._write_tokens("expired", 0)
+
+        def urlopen(req, timeout=None):
+            self._write_tokens("from_auth", NOW_TS + 3600, refresh_token="r_auth")
+            return _FakeResp({"access_token": "from_refresh", "refresh_token": "r2"})
 
         with (
-            patch.object(auth, "_cached_tokens", None),
-            patch.object(auth, "_cached_creds", None),
             patch.object(auth, "datetime", _FixedDatetime),
-            patch.object(auth, "_load_json", fake_load),
+            patch("urllib.request.urlopen", urlopen),
         ):
-            tok = auth.refresh_token()
+            token = auth.refresh_token()
 
-        self.assertEqual(tok, "disk_tok")
-        # Both credential files were read exactly once to populate the cache.
-        self.assertIn(auth.MONZO_TOKENS_PATH, loaded)
-        self.assertIn(auth.MONZO_CLIENT_PATH, loaded)
+        self.assertEqual(token, "from_auth")
+        self.assertEqual(
+            json.loads(auth.MONZO_TOKENS_PATH.read_text())["access_token"], "from_auth"
+        )
+
+    def test_a_refresh_saves_over_a_file_replaced_by_an_older_copy(self):
+        """Only a later grant wins. Yielding to an older one returns a token that
+        has expired and leaves the file without the refresh token just issued."""
+        self._write_tokens("expired", 100)
+
+        def urlopen(req, timeout=None):
+            self._write_tokens("restored", 50, refresh_token="r_old")
+            return _FakeResp({"access_token": "from_refresh", "refresh_token": "r2"})
+
+        with patch("urllib.request.urlopen", urlopen):
+            token = auth.refresh_token()
+
+        self.assertEqual(token, "from_refresh")
+        saved = json.loads(auth.MONZO_TOKENS_PATH.read_text())
+        self.assertEqual((saved["access_token"], saved["refresh_token"]), ("from_refresh", "r2"))
+
+    def test_a_refusal_after_the_file_was_replaced_uses_the_new_file(self):
+        """The refusal judged a refresh token someone else had already replaced,
+        by refreshing first or by `auth`. Reporting it as a refusal tells the
+        user to re-authorise over a working grant."""
+        self._write_tokens("expired", 0)
+
+        def urlopen(req, timeout=None):
+            self._write_tokens("from_auth", 9_999_999_999, refresh_token="r_auth")
+            raise urllib.error.HTTPError("https://example.invalid", 400, "no", {}, io.BytesIO(b""))
+
+        with patch("urllib.request.urlopen", urlopen):
+            self.assertEqual(auth.refresh_token(), "from_auth")
+
+    def test_a_refusal_after_the_file_was_replaced_by_an_older_copy_is_a_refusal(self):
+        self._write_tokens("expired", 100)
+
+        def urlopen(req, timeout=None):
+            self._write_tokens("restored", 50, refresh_token="r_old")
+            raise urllib.error.HTTPError("https://example.invalid", 400, "no", {}, io.BytesIO(b""))
+
+        with patch("urllib.request.urlopen", urlopen):
+            with self.assertRaises(auth.TokenRefused):
+                auth.refresh_token()
+
+    def test_a_refusal_while_the_file_is_unreadable_is_not_a_refusal(self):
+        """The file is most likely part-way through being replaced, which clears
+        on its own; a refusal would tell the user to re-authorise over it."""
+        self._write_tokens("expired", 0)
+
+        def urlopen(req, timeout=None):
+            write_credentials("{")
+            raise urllib.error.HTTPError("https://example.invalid", 400, "no", {}, io.BytesIO(b""))
+
+        with patch("urllib.request.urlopen", urlopen):
+            with self.assertRaises(auth.RefreshNetworkError):
+                auth.refresh_token()
+
+    def test_a_refusal_with_the_file_unchanged_is_still_a_refusal(self):
+        self._write_tokens("expired", 0)
+
+        def urlopen(req, timeout=None):
+            raise urllib.error.HTTPError("https://example.invalid", 400, "no", {}, io.BytesIO(b""))
+
+        with patch("urllib.request.urlopen", urlopen):
+            with self.assertRaises(auth.TokenRefused):
+                auth.refresh_token()
+
+    def test_concurrent_calls_refresh_once(self):
+        """Tool calls run in worker threads. Unserialised, a second call reads
+        the file while the first is saving it, or spends the same refresh token,
+        which Monzo rotates on use."""
+        self._write_tokens("expired", 0)
+        posts = []
+        second = {}
+
+        def call_from_another_thread():
+            second["token"] = auth.refresh_token()
+
+        other = threading.Thread(target=call_from_another_thread)
+
+        def urlopen(req, timeout=None):
+            posts.append(req)
+            if len(posts) == 1:
+                other.start()
+                # Long enough for an unserialised second call to reach the
+                # network; with the lock it is still waiting when this returns.
+                other.join(timeout=0.5)
+            return _FakeResp({"access_token": f"from_refresh_{len(posts)}", "refresh_token": "r2"})
+
+        with patch("urllib.request.urlopen", urlopen):
+            first = auth.refresh_token()
+            other.join(timeout=5)
+
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(second["token"], first)
+
+    def test_a_refresh_does_not_overwrite_a_file_caught_mid_write(self):
+        """Unreadable after the refresh most likely means another writer is
+        part-way through, so the token just obtained is returned unsaved."""
+        self._write_tokens("expired", 0)
+
+        def urlopen(req, timeout=None):
+            write_credentials("{")
+            return _FakeResp({"access_token": "from_refresh", "refresh_token": "r2"})
+
+        with patch("urllib.request.urlopen", urlopen):
+            token = auth.refresh_token()
+
+        self.assertEqual(token, "from_refresh")
+        self.assertEqual(auth.MONZO_TOKENS_PATH.read_text(), "{")
+
+    def test_an_undisturbed_refresh_is_saved(self):
+        self._write_tokens("expired", 0)
+
+        def urlopen(req, timeout=None):
+            return _FakeResp({"access_token": "from_refresh", "refresh_token": "r2"})
+
+        with patch("urllib.request.urlopen", urlopen):
+            self.assertEqual(auth.refresh_token(), "from_refresh")
+
+        saved = json.loads(auth.MONZO_TOKENS_PATH.read_text())
+        self.assertEqual((saved["access_token"], saved["refresh_token"]), ("from_refresh", "r2"))
+
+    def test_new_client_credentials_are_used_without_a_restart(self):
+        """`auth` can replace the client too, when reuse is declined."""
+        self._write_tokens("expired", 0)
+        sent = []
+
+        def urlopen(req, timeout=None):
+            sent.append(parse_qs(req.data.decode())["client_id"][0])
+            return _FakeResp({"access_token": "t", "refresh_token": "r2"})
+
+        with patch("urllib.request.urlopen", urlopen):
+            auth.refresh_token()
+            self._rewrite_unnoticeably(
+                auth.MONZO_CLIENT_PATH,
+                json.dumps({"client_id": "cid_swap", "client_secret": "csecret_test"}),
+            )
+            self._write_tokens("expired", 0)
+            auth.refresh_token()
+
+        self.assertEqual(sent, ["cid_test", "cid_swap"])
 
 
 class TestJsonHelpers(unittest.TestCase):
@@ -722,13 +900,9 @@ class TestCredentialFilesAreRefusals(unittest.TestCase):
     def setUp(self):
         self._dir = tempfile.TemporaryDirectory()
         self.dir = pathlib.Path(self._dir.name)
-        auth._cached_tokens = None
-        auth._cached_creds = None
 
     def tearDown(self):
         self._dir.cleanup()
-        auth._cached_tokens = None
-        auth._cached_creds = None
 
     def _refresh_with_files(self, tokens=None, creds='{"client_id": "i", "client_secret": "s"}'):
         tokens_path = self.dir / "monzo_tokens.json"

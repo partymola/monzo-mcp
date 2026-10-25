@@ -8,6 +8,7 @@ import urllib.request
 import pytest
 
 from monzo_mcp import auth, config, db, helpers
+from tests import isolated_files
 
 #: The modules that bind a path at import and so keep their own copy of it -
 #: patching `config` alone reaches none of them. Pinned by
@@ -34,12 +35,7 @@ def _no_real_credentials(tmp_path_factory, monkeypatch):
         monkeypatch.setattr(module, "CONFIG_DIR", isolated_config)
     for module in _DATABASE_HOLDERS:
         monkeypatch.setattr(module, "DB_PATH", empty / "monzo.db")
-
-    # The token cache outlives the files: left populated by one test it hands
-    # the next a working access token with no credential file anywhere, which
-    # is the same "every test remembers" the fixtures exist to replace.
-    monkeypatch.setattr(auth, "_cached_tokens", None)
-    monkeypatch.setattr(auth, "_cached_creds", None)
+    monkeypatch.setattr(isolated_files, "ROOT", empty)
 
 
 @pytest.fixture(autouse=True)

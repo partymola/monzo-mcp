@@ -7,6 +7,7 @@ import os
 import secrets
 import socket
 import sys
+import threading
 import urllib.error
 import urllib.request
 import webbrowser
@@ -75,9 +76,10 @@ class RefreshNetworkError(MonzoError, RuntimeError):
     """
 
 
-# In-memory token cache to avoid re-reading JSON files on every API call
-_cached_tokens = None
-_cached_creds = None
+# Tool calls run in worker threads. Without this, one can read the token file
+# while another is half-way through saving it, and two can spend the same
+# refresh token.
+_token_lock = threading.Lock()
 
 
 def _save_json(path, data):
@@ -123,32 +125,43 @@ def _load_json(path):
     return data
 
 
+def _reread_tokens():
+    """The token file as it is now, or None if it cannot be read."""
+    try:
+        return _load_json(MONZO_TOKENS_PATH)
+    except TokenRefused:
+        return None
+
+
 def _refresh_token() -> str:
     """Return a valid access token, refreshing if expired.
 
     Checks expiry with a 5-minute buffer. If expired, uses the refresh_token
-    grant to obtain new tokens and updates the token file.
+    grant, and saves the result unless the token file now holds a later expiry
+    or cannot be read.
+
+    Both files are read on every call and nothing is kept between calls:
+    `monzo-mcp auth` replaces them from another process while the server runs.
+    A file whose expiry is later than the one this call started from was
+    written by someone else during the request, and is used instead. One that
+    cannot be read is most likely part-way through such a write.
     """
-    global _cached_tokens, _cached_creds
+    tokens = _load_json(MONZO_TOKENS_PATH)
+    creds = _load_json(MONZO_CLIENT_PATH)
 
-    if _cached_tokens is None:
-        _cached_tokens = _load_json(MONZO_TOKENS_PATH)
-    if _cached_creds is None:
-        _cached_creds = _load_json(MONZO_CLIENT_PATH)
+    if datetime.now(timezone.utc).timestamp() < tokens.get("expiry", 0) - 300:
+        return tokens["access_token"]
 
-    if datetime.now(timezone.utc).timestamp() < _cached_tokens.get("expiry", 0) - 300:
-        return _cached_tokens["access_token"]
-
-    if not _cached_tokens.get("refresh_token"):
+    if not tokens.get("refresh_token"):
         logger.error("Token expired and no refresh token. Run: monzo-mcp auth")
         raise TokenRefused("Token expired and no refresh token. Run: monzo-mcp auth")
 
     data = urlencode(
         {
             "grant_type": "refresh_token",
-            "client_id": _cached_creds["client_id"],
-            "client_secret": _cached_creds["client_secret"],
-            "refresh_token": _cached_tokens["refresh_token"],
+            "client_id": creds["client_id"],
+            "client_secret": creds["client_secret"],
+            "refresh_token": tokens["refresh_token"],
         }
     ).encode()
 
@@ -161,6 +174,15 @@ def _refresh_token() -> str:
         # says about the credentials rather than by range: a bad grant is
         # refused with 400/401/403, while 429 carries no judgement at all.
         if e.code in _REFUSAL_CODES:
+            # A refusal judges the refresh token sent, which a concurrent
+            # refresh or `monzo-mcp auth` may already have replaced.
+            on_disk = _reread_tokens()
+            if on_disk is None:
+                logger.warning("Token refresh refused while the token file was unreadable")
+                raise RefreshNetworkError("The token file was being replaced.") from e
+            if on_disk.get("expiry", 0) > tokens.get("expiry", 0):
+                logger.warning("Token refresh refused, but the token file was replaced meanwhile")
+                return on_disk["access_token"]
             logger.error("Token refresh refused with HTTP %s", e.code)
             raise TokenRefused("Token refresh failed. Run: monzo-mcp auth") from e
         logger.error("Token refresh got HTTP %s from the server", e.code)
@@ -181,14 +203,26 @@ def _refresh_token() -> str:
         logger.error("Token refresh returned an unexpected response shape")
         raise TokenRefused("Token refresh failed. Run: monzo-mcp auth")
 
-    _cached_tokens = {
+    refreshed = {
         "access_token": new_tokens["access_token"],
-        "refresh_token": new_tokens.get("refresh_token", _cached_tokens["refresh_token"]),
+        "refresh_token": new_tokens.get("refresh_token", tokens["refresh_token"]),
         "token_type": new_tokens.get("token_type", "Bearer"),
         "expiry": datetime.now(timezone.utc).timestamp() + new_tokens.get("expires_in", 86400),
     }
-    _save_json(MONZO_TOKENS_PATH, _cached_tokens)
-    return _cached_tokens["access_token"]
+
+    # Saving over a grant written during the request loses it. A file that
+    # cannot be read is most likely part-way through such a write, so it is
+    # left alone too.
+    on_disk = _reread_tokens()
+    if on_disk is None:
+        logger.warning("Token file unreadable after refresh; not saving over it")
+        return refreshed["access_token"]
+    if on_disk.get("expiry", 0) > tokens.get("expiry", 0):
+        logger.warning("Token file was replaced during refresh; using it instead")
+        return on_disk["access_token"]
+
+    _save_json(MONZO_TOKENS_PATH, refreshed)
+    return refreshed["access_token"]
 
 
 def refresh_token() -> str:
@@ -207,7 +241,8 @@ def refresh_token() -> str:
     visible, and it does not tell anyone to rotate a shared token file.
     """
     try:
-        return _refresh_token()
+        with _token_lock:
+            return _refresh_token()
     except (TokenRefused, RefreshNetworkError):
         raise
     except Exception as e:

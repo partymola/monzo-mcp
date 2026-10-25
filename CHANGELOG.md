@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- A running server now picks up the tokens written by `monzo-mcp auth` without a restart. It read the token file once and kept using that copy. After a new authorisation Monzo can refuse the old token. Every request then failed with "Access token invalid" until the server was restarted. This included the few minutes after approval in the Monzo app. Those minutes are the only time a sync can fetch history older than 90 days. The token and client files are now read on every request.
+- A token refresh no longer saves over tokens written while its request to Monzo was in flight. If `monzo-mcp auth` finished during a refresh, the refresh replaced the new grant with its own result. The newer tokens now win.
+- A refused refresh is no longer reported as needing `monzo-mcp auth` when the token file was replaced meanwhile. This happens when two servers share the token file and refresh at once, or `auth` completes during a refresh. The server now uses the tokens in the file.
+- Tool calls in one server no longer refresh the token at the same time. Two concurrent refreshes spent the same refresh token, and one could read the file while the other was saving it.
+
 ## [0.10.0] - 2026-09-29
 
 ### Fixed

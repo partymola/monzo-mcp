@@ -1,10 +1,11 @@
 """Tests for the read-only Monzo API GET wrapper.
 
 The HTTP layer (`urllib.request.urlopen`) is mocked throughout - no network,
-no credentials. Tests cover the happy path, the auto-refresh-on-expiry flow
-driven through the *real* refresh_token, and the mapping from HTTP status codes
-to typed exceptions. The wrapper is read-only by contract: assertions pin that
-every request it issues is a GET with no body.
+and only fictional credential files in the isolated directory. Tests cover the
+happy path, the auto-refresh-on-expiry flow driven through the *real*
+refresh_token, and the mapping from HTTP status codes to typed exceptions. The
+wrapper is read-only by contract: assertions pin that every request it issues
+is a GET with no body.
 """
 
 import io
@@ -16,6 +17,7 @@ from unittest.mock import MagicMock, patch
 from monzo_mcp import api, auth
 from monzo_mcp.api import MonzoAPIError, MonzoAuthError, MonzoSCAError
 from monzo_mcp.config import MONZO_API_BASE, MONZO_TOKEN_URL
+from tests.isolated_files import write_credentials
 
 
 class _FakeResp:
@@ -68,7 +70,7 @@ class TestAutoRefreshOnExpiry(unittest.TestCase):
     """api.get -> refresh_token: an expired token is refreshed transparently."""
 
     def test_expired_token_is_refreshed_then_request_uses_new_token(self):
-        # Cached token already expired (expiry in the past). refresh_token should
+        # Stored token already expired (expiry in the past). refresh_token should
         # POST to the token endpoint, then api.get should send the *new* token.
         expired = {
             "access_token": "old_tok",
@@ -91,9 +93,8 @@ class TestAutoRefreshOnExpiry(unittest.TestCase):
             seen["auth_headers"].append(req.get_header("Authorization"))
             return _FakeResp({"balance": 500})
 
+        write_credentials(expired, creds)
         with (
-            patch.object(auth, "_cached_tokens", dict(expired)),
-            patch.object(auth, "_cached_creds", dict(creds)),
             patch.object(auth, "_save_json", lambda path, data: None),
             patch("urllib.request.urlopen", fake_urlopen),
         ):
@@ -119,11 +120,8 @@ class TestAutoRefreshOnExpiry(unittest.TestCase):
                 return _FakeResp({})
             return _FakeResp({"ok": True})
 
-        with (
-            patch.object(auth, "_cached_tokens", dict(valid)),
-            patch.object(auth, "_cached_creds", {"client_id": "c", "client_secret": "s"}),
-            patch("urllib.request.urlopen", fake_urlopen),
-        ):
+        write_credentials(valid, {"client_id": "c", "client_secret": "s"})
+        with patch("urllib.request.urlopen", fake_urlopen):
             result = api.get("/ping")
 
         self.assertEqual(result, {"ok": True})

@@ -18,6 +18,7 @@ import pytest
 import monzo_mcp
 from monzo_mcp import auth, config, db, helpers
 from monzo_mcp.errors import MonzoError
+from tests import isolated_files
 
 
 def test_the_suite_cannot_reach_the_network():
@@ -168,25 +169,15 @@ def test_every_exception_this_package_defines_reaches_the_model():
     )
 
 
-def test_the_fixture_clears_the_token_cache():
-    """`auth` caches tokens in module state, which outlives the files.
+def test_the_credential_writer_refuses_outside_the_isolated_directory(monkeypatch):
+    """The refresh tests write real files through it, so its check is what
+    stands between a broken conftest and the live credentials. A sibling of the
+    isolated directory catches a check made against anything wider."""
+    outside = isolated_files.ROOT.parent / "elsewhere" / "monzo_tokens.json"
+    with pytest.raises(pytest.fail.Exception, match="refusing to write"):
+        isolated_files.write_isolated(outside, "{}")
+    assert not outside.exists()
 
-    Left populated by one test it hands the next a working access token with
-    no credential file anywhere. The property is only observable across two
-    tests, and a pair of ordered tests asserting it passes vacuously when
-    either is run alone and breaks under any run-order randomiser - so the
-    fixture is read instead, the shape this suite already uses for claims
-    nothing can execute.
-    """
-    source = (Path(__file__).parent / "conftest.py").read_text()
-    cleared = {
-        node.args[1].value
-        for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.Call)
-        and getattr(node.func, "attr", None) == "setattr"
-        and len(node.args) == 3
-        and isinstance(node.args[1], ast.Constant)
-    }
-    assert {"_cached_tokens", "_cached_creds"} <= cleared, (
-        f"the token cache is no longer cleared between tests: {sorted(cleared)}"
-    )
+    monkeypatch.setattr(isolated_files, "ROOT", None)
+    with pytest.raises(pytest.fail.Exception, match="refusing to write"):
+        isolated_files.write_isolated(auth.MONZO_TOKENS_PATH, "{}")
