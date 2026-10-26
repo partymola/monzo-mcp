@@ -83,7 +83,7 @@ _token_lock = threading.Lock()
 
 # A refreshed grant whose save failed: (the refresh token the file held when
 # the save failed, the grant). Monzo rotates the refresh token, so the file's
-# is already spent and this is the only live copy. It is used only while the
+# may already be spent and this the only live copy. It is used only while the
 # file still holds that token or cannot be read, an unreadable file being
 # taken for this process's own failed write.
 _unsaved = None
@@ -243,8 +243,8 @@ def _refresh_token() -> str:
             # `monzo-mcp auth` replaced it, and the next call refreshes from it.
             on_disk = _reread_tokens()
             if on_disk is None and _unsaved is not None:
-                # The held grant was refused, and the empty file is this
-                # process's own failed write, which holds nothing newer.
+                # The held grant was refused, and the empty file is taken for
+                # this process's own failed write, which holds nothing newer.
                 _unsaved = None
                 logger.error("Token refresh refused with HTTP %s", e.code)
                 raise TokenRefused("Token refresh failed. Run: monzo-mcp auth") from e
@@ -288,8 +288,8 @@ def _refresh_token() -> str:
 
     # Saving over a grant written during the request loses it. A file that
     # cannot be read is most likely part-way through such a write, so it is
-    # left alone too, unless a grant is held: then it is the one a failed save
-    # of this process's emptied.
+    # left alone too, unless a grant is held: then the file is the one this
+    # process's own failed save emptied.
     on_disk = _reread_tokens()
     if on_disk is None and _unsaved is None:
         logger.warning("Token file unreadable after refresh; not saving over it")
