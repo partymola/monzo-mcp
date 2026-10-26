@@ -169,6 +169,23 @@ def test_every_exception_this_package_defines_reaches_the_model():
     )
 
 
+def test_the_fixture_clears_a_held_grant():
+    """`auth` holds a grant whose save failed in module state, which outlives
+    the test that failed the save. Left set, it answers the next test that
+    happens to share a refresh token, with no credential file involved.
+    Observable only across two tests, so the fixture is read instead."""
+    source = (Path(__file__).parent / "conftest.py").read_text()
+    cleared = {
+        node.args[1].value
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and getattr(node.func, "attr", None) == "setattr"
+        and len(node.args) == 3
+        and isinstance(node.args[1], ast.Constant)
+    }
+    assert "_unsaved" in cleared, f"conftest no longer clears auth._unsaved: {sorted(cleared)}"
+
+
 def test_the_credential_writer_refuses_outside_the_isolated_directory(monkeypatch):
     """The refresh tests write real files through it, so its check is what
     stands between a broken conftest and the live credentials. A sibling of the

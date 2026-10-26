@@ -36,6 +36,8 @@ def _no_real_credentials(tmp_path_factory, monkeypatch):
     for module in _DATABASE_HOLDERS:
         monkeypatch.setattr(module, "DB_PATH", empty / "monzo.db")
     monkeypatch.setattr(isolated_files, "ROOT", empty)
+    # A grant held after a failed save outlives the test that failed the save.
+    monkeypatch.setattr(auth, "_unsaved", None)
 
 
 @pytest.fixture(autouse=True)

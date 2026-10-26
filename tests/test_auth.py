@@ -392,6 +392,187 @@ class TestTheTokenFileIsTheOnlyCopy(unittest.TestCase):
         saved = json.loads(auth.MONZO_TOKENS_PATH.read_text())
         self.assertEqual((saved["access_token"], saved["refresh_token"]), ("from_refresh", "r2"))
 
+    def test_a_refresh_saves_over_a_later_copy_whose_token_has_expired(self):
+        """Later is not enough: yielding to an expired copy returns a token that
+        is refused, and drops the refresh token just issued, which rotation
+        has made the only live one."""
+        self._write_tokens("expired", 50)
+
+        def urlopen(req, timeout=None):
+            self._write_tokens("stale", 100, refresh_token="r_stale")
+            return _FakeResp({"access_token": "from_refresh", "refresh_token": "r2"})
+
+        with patch("urllib.request.urlopen", urlopen):
+            token = auth.refresh_token()
+
+        self.assertEqual(token, "from_refresh")
+        self.assertEqual(json.loads(auth.MONZO_TOKENS_PATH.read_text())["refresh_token"], "r2")
+
+    def test_a_refusal_after_the_file_changed_to_an_unusable_copy_is_not_a_refusal(self):
+        """The refusal judged the refresh token sent, not the one now in the
+        file, so the next call refreshes with that one rather than this call
+        telling the user to re-authorise."""
+        for expiry in (100, 50):
+            with self.subTest(copy_expiry=expiry):
+                self._write_tokens("expired", 75)
+
+                def urlopen(req, timeout=None, expiry=expiry):
+                    self._write_tokens("copy", expiry, refresh_token="r_copy")
+                    raise urllib.error.HTTPError(
+                        "https://example.invalid", 400, "no", {}, io.BytesIO(b"")
+                    )
+
+                with patch("urllib.request.urlopen", urlopen):
+                    with self.assertRaises(auth.RefreshNetworkError):
+                        auth.refresh_token()
+
+    def test_a_refresh_saves_when_the_clock_steps_back_during_it(self):
+        """The file is untouched and its token still looks valid by the stepped
+        clock; only the later-expiry test tells it from a grant someone saved,
+        and yielding to it leaves the file on a refresh token Monzo has retired."""
+        clock = {"now": NOW_TS}
+
+        class _SteppingDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime.fromtimestamp(clock["now"], tz)
+
+        self._write_tokens("old", NOW_TS + 200, refresh_token="r0")
+
+        def urlopen(req, timeout=None):
+            clock["now"] = NOW_TS - 1000
+            return _FakeResp({"access_token": "from_refresh", "refresh_token": "r2"})
+
+        with (
+            patch.object(auth, "datetime", _SteppingDatetime),
+            patch("urllib.request.urlopen", urlopen),
+        ):
+            self.assertEqual(auth.refresh_token(), "from_refresh")
+        self.assertEqual(json.loads(auth.MONZO_TOKENS_PATH.read_text())["refresh_token"], "r2")
+
+    def _fail_saves(self, times, truncate=False):
+        """A `_save_json` that raises OSError for its first `times` calls."""
+        real = auth._save_json
+        calls = {"n": 0}
+
+        def save(path, data):
+            calls["n"] += 1
+            if calls["n"] <= times:
+                if truncate:
+                    write_credentials("")
+                raise OSError(28, "No space left on device")
+            real(path, data)
+
+        return patch.object(auth, "_save_json", save)
+
+    def test_a_grant_whose_save_failed_is_kept_and_saved_later(self):
+        """Monzo has already rotated the refresh token in the file, so the
+        refreshed grant is the only live copy until a save succeeds."""
+        for truncate in (False, True):
+            with self.subTest(file_emptied_by_the_failed_write=truncate):
+                auth._unsaved = None
+                self._write_tokens("expired", 0, refresh_token="r1")
+
+                def urlopen(req, timeout=None):
+                    return _FakeResp(
+                        {"access_token": "from_refresh", "refresh_token": "r2", "expires_in": 3600}
+                    )
+
+                with (
+                    self._fail_saves(1, truncate=truncate),
+                    patch("urllib.request.urlopen", urlopen),
+                ):
+                    self.assertEqual(auth.refresh_token(), "from_refresh")
+                    self.assertEqual(auth.refresh_token(), "from_refresh")
+                saved = json.loads(auth.MONZO_TOKENS_PATH.read_text())
+                self.assertEqual(saved["refresh_token"], "r2")
+                self.assertIsNone(auth._unsaved)
+
+    def test_a_held_grant_that_expires_is_refreshed_and_saved_over_its_own_empty_file(self):
+        """The file is empty because this process's save failed half-way, not
+        because another writer is mid-write, so the next refresh repairs it."""
+        self._write_tokens("expired", 0, refresh_token="r1")
+        answers = [
+            {"access_token": "short", "refresh_token": "r2", "expires_in": 0},
+            {"access_token": "long", "refresh_token": "r3", "expires_in": 3600},
+        ]
+
+        def urlopen(req, timeout=None):
+            return _FakeResp(answers.pop(0))
+
+        with self._fail_saves(2, truncate=True), patch("urllib.request.urlopen", urlopen):
+            auth.refresh_token()
+            self.assertEqual(auth.refresh_token(), "long")
+        self.assertEqual(json.loads(auth.MONZO_TOKENS_PATH.read_text())["refresh_token"], "r3")
+
+    def test_a_held_grant_gives_way_to_a_file_written_since(self):
+        self._write_tokens("expired", 0, refresh_token="r1")
+
+        def urlopen(req, timeout=None):
+            return _FakeResp(
+                {"access_token": "from_refresh", "refresh_token": "r2", "expires_in": 3600}
+            )
+
+        with self._fail_saves(1), patch("urllib.request.urlopen", urlopen):
+            auth.refresh_token()
+        self._write_tokens("from_auth", 9_999_999_999, refresh_token="r_auth")
+        self.assertEqual(auth.refresh_token(), "from_auth")
+        self.assertIsNone(auth._unsaved)
+
+    def test_a_refused_held_grant_is_a_refusal(self):
+        """Otherwise the held grant's refusal reads as a change to the file,
+        which still holds the token it replaced or was emptied by the failed
+        write, and every call refreshes with a dead token."""
+        for truncate in (False, True):
+            with self.subTest(file_emptied_by_the_failed_write=truncate):
+                auth._unsaved = None
+                self._write_tokens("expired", 0, refresh_token="r1")
+                answers = [
+                    _FakeResp({"access_token": "short", "refresh_token": "r2", "expires_in": 0}),
+                    urllib.error.HTTPError(
+                        "https://example.invalid", 400, "no", {}, io.BytesIO(b"")
+                    ),
+                ]
+
+                def urlopen(req, timeout=None, answers=answers):
+                    answer = answers.pop(0)
+                    if isinstance(answer, Exception):
+                        raise answer
+                    return answer
+
+                with (
+                    self._fail_saves(9, truncate=truncate),
+                    patch("urllib.request.urlopen", urlopen),
+                ):
+                    auth.refresh_token()
+                    with self.assertRaises(auth.TokenRefused):
+                        auth.refresh_token()
+                self.assertIsNone(auth._unsaved)
+
+    def test_a_held_grant_is_keyed_to_the_file_as_it_was_when_the_save_failed(self):
+        """The file can change during the request. Keyed to the token the call
+        started from, the held grant is dropped on the next call though it is
+        the only live copy."""
+        self._write_tokens("expired", 0, refresh_token="r1")
+
+        def urlopen(req, timeout=None):
+            self._write_tokens("copy", 50, refresh_token="r_copy")
+            return _FakeResp(
+                {"access_token": "from_refresh", "refresh_token": "r2", "expires_in": 3600}
+            )
+
+        with self._fail_saves(1), patch("urllib.request.urlopen", urlopen):
+            auth.refresh_token()
+        self.assertEqual(auth.refresh_token(), "from_refresh")
+        self.assertEqual(json.loads(auth.MONZO_TOKENS_PATH.read_text())["refresh_token"], "r2")
+
+    def test_a_valid_token_does_not_need_the_client_file(self):
+        """Only a refresh uses it, so a moment when it cannot be read must not
+        refuse a token that needs no refresh."""
+        auth.MONZO_CLIENT_PATH.unlink()
+        self._write_tokens("valid", 9_999_999_999)
+        self.assertEqual(auth.refresh_token(), "valid")
+
     def test_a_refusal_after_the_file_was_replaced_uses_the_new_file(self):
         """The refusal judged a refresh token someone else had already replaced,
         by refreshing first or by `auth`. Reporting it as a refusal tells the
@@ -404,17 +585,6 @@ class TestTheTokenFileIsTheOnlyCopy(unittest.TestCase):
 
         with patch("urllib.request.urlopen", urlopen):
             self.assertEqual(auth.refresh_token(), "from_auth")
-
-    def test_a_refusal_after_the_file_was_replaced_by_an_older_copy_is_a_refusal(self):
-        self._write_tokens("expired", 100)
-
-        def urlopen(req, timeout=None):
-            self._write_tokens("restored", 50, refresh_token="r_old")
-            raise urllib.error.HTTPError("https://example.invalid", 400, "no", {}, io.BytesIO(b""))
-
-        with patch("urllib.request.urlopen", urlopen):
-            with self.assertRaises(auth.TokenRefused):
-                auth.refresh_token()
 
     def test_a_refusal_while_the_file_is_unreadable_is_not_a_refusal(self):
         """The file is most likely part-way through being replaced, which clears

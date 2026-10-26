@@ -81,6 +81,13 @@ class RefreshNetworkError(MonzoError, RuntimeError):
 # refresh token.
 _token_lock = threading.Lock()
 
+# A refreshed grant whose save failed: (the refresh token the file held when
+# the save failed, the grant). Monzo rotates the refresh token, so the file's
+# is already spent and this is the only live copy. It is used only while the
+# file still holds that token or cannot be read, an unreadable file being
+# taken for this process's own failed write.
+_unsaved = None
+
 
 def _save_json(path, data):
     """Write a credential file at owner-only permissions from the outset.
@@ -133,29 +140,86 @@ def _reread_tokens():
         return None
 
 
+def _expiry(tokens):
+    """The stored expiry, or 0 when it is unusable."""
+    value = tokens.get("expiry", 0)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return 0
+    return value
+
+
+def _usable(tokens):
+    """Whether the stored access token can be sent, with the 5-minute buffer."""
+    now = datetime.now(timezone.utc).timestamp()
+    return bool(tokens.get("access_token")) and now < _expiry(tokens) - 300
+
+
+def _replaced_by_a_later_grant(on_disk, tokens):
+    """Whether `on_disk` is a grant saved since `tokens` was read, and usable.
+
+    Later rather than merely different, and usable rather than merely later,
+    because Monzo rotates the refresh token: the one just issued is known to
+    be live and another copy's usually is not, so saving over that copy is
+    what keeps it.
+    """
+    return _expiry(on_disk) > _expiry(tokens) and _usable(on_disk)
+
+
+def _current_tokens():
+    """The token file, or the grant held after a failed save while it still applies."""
+    global _unsaved
+    if _unsaved is not None:
+        file_token, held = _unsaved
+        on_disk = _reread_tokens()
+        if on_disk is None or on_disk.get("refresh_token") == file_token:
+            _save(held, file_token)
+            return held
+        _unsaved = None
+    return _load_json(MONZO_TOKENS_PATH)
+
+
+def _save(refreshed, file_token):
+    """Save a refreshed grant, or hold it if the save fails.
+
+    `file_token` is the refresh token the file holds, which is what a held
+    grant is matched against on the next call.
+    """
+    global _unsaved
+    try:
+        _save_json(MONZO_TOKENS_PATH, refreshed)
+    except OSError:
+        logger.warning("Could not save the refreshed token; holding it until a save succeeds")
+        _unsaved = (file_token, refreshed)
+    else:
+        _unsaved = None
+
+
 def _refresh_token() -> str:
     """Return a valid access token, refreshing if expired.
 
     Checks expiry with a 5-minute buffer. If expired, uses the refresh_token
-    grant, and saves the result unless the token file now holds a later expiry
-    or cannot be read.
+    grant, and saves the result unless the token file now holds a later usable
+    grant or cannot be read.
 
-    Both files are read on every call and nothing is kept between calls:
-    `monzo-mcp auth` replaces them from another process while the server runs.
-    A file whose expiry is later than the one this call started from was
-    written by someone else during the request, and is used instead. One that
-    cannot be read is most likely part-way through such a write.
+    The token file is read on every call and the client file on every refresh,
+    and nothing is kept between calls: `monzo-mcp auth` replaces them from
+    another process while the server runs. A file that cannot be read is most
+    likely part-way through such a write. The one exception is a grant whose
+    save failed, held by `_current_tokens` while the file still holds the
+    token it replaced.
     """
-    tokens = _load_json(MONZO_TOKENS_PATH)
-    creds = _load_json(MONZO_CLIENT_PATH)
+    global _unsaved
+    tokens = _current_tokens()
+    file_token = _unsaved[0] if _unsaved is not None else tokens.get("refresh_token")
 
-    if datetime.now(timezone.utc).timestamp() < tokens.get("expiry", 0) - 300:
+    if _usable(tokens):
         return tokens["access_token"]
 
     if not tokens.get("refresh_token"):
         logger.error("Token expired and no refresh token. Run: monzo-mcp auth")
         raise TokenRefused("Token expired and no refresh token. Run: monzo-mcp auth")
 
+    creds = _load_json(MONZO_CLIENT_PATH)
     data = urlencode(
         {
             "grant_type": "refresh_token",
@@ -174,15 +238,27 @@ def _refresh_token() -> str:
         # says about the credentials rather than by range: a bad grant is
         # refused with 400/401/403, while 429 carries no judgement at all.
         if e.code in _REFUSAL_CODES:
-            # A refusal judges the refresh token sent, which a concurrent
-            # refresh or `monzo-mcp auth` may already have replaced.
+            # A refusal judges the refresh token sent and nothing else. If the
+            # file now holds a different one, a concurrent refresh or
+            # `monzo-mcp auth` replaced it, and the next call refreshes from it.
             on_disk = _reread_tokens()
+            if on_disk is None and _unsaved is not None:
+                # The held grant was refused, and the empty file is this
+                # process's own failed write, which holds nothing newer.
+                _unsaved = None
+                logger.error("Token refresh refused with HTTP %s", e.code)
+                raise TokenRefused("Token refresh failed. Run: monzo-mcp auth") from e
             if on_disk is None:
                 logger.warning("Token refresh refused while the token file was unreadable")
                 raise RefreshNetworkError("The token file was being replaced.") from e
-            if on_disk.get("expiry", 0) > tokens.get("expiry", 0):
-                logger.warning("Token refresh refused, but the token file was replaced meanwhile")
-                return on_disk["access_token"]
+            if on_disk.get("refresh_token") not in (tokens.get("refresh_token"), file_token):
+                _unsaved = None
+                if _usable(on_disk):
+                    logger.warning("Token refresh refused, but the token file was replaced")
+                    return on_disk["access_token"]
+                logger.warning("Token refresh refused while the token file was changing")
+                raise RefreshNetworkError("The token file changed during the refresh.") from e
+            _unsaved = None
             logger.error("Token refresh refused with HTTP %s", e.code)
             raise TokenRefused("Token refresh failed. Run: monzo-mcp auth") from e
         logger.error("Token refresh got HTTP %s from the server", e.code)
@@ -212,16 +288,20 @@ def _refresh_token() -> str:
 
     # Saving over a grant written during the request loses it. A file that
     # cannot be read is most likely part-way through such a write, so it is
-    # left alone too.
+    # left alone too, unless a grant is held: then it is the one a failed save
+    # of this process's emptied.
     on_disk = _reread_tokens()
-    if on_disk is None:
+    if on_disk is None and _unsaved is None:
         logger.warning("Token file unreadable after refresh; not saving over it")
         return refreshed["access_token"]
-    if on_disk.get("expiry", 0) > tokens.get("expiry", 0):
+    if on_disk is not None and _replaced_by_a_later_grant(on_disk, tokens):
         logger.warning("Token file was replaced during refresh; using it instead")
+        _unsaved = None
         return on_disk["access_token"]
 
-    _save_json(MONZO_TOKENS_PATH, refreshed)
+    # Keyed to what the file holds now, which may have changed during the
+    # request: that is what the next call compares against.
+    _save(refreshed, on_disk.get("refresh_token") if on_disk is not None else file_token)
     return refreshed["access_token"]
 
 
