@@ -1,5 +1,6 @@
 """Monzo OAuth setup and token management."""
 
+import contextlib
 import http.client
 import json
 import logging
@@ -7,12 +8,15 @@ import os
 import secrets
 import socket
 import sys
+import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 import webbrowser
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from .config import (
@@ -84,35 +88,54 @@ _token_lock = threading.Lock()
 # A refreshed grant whose save failed: (the refresh token the file held when
 # the save failed, the grant). Monzo rotates the refresh token, so the file's
 # may already be spent and this the only live copy. It is used only while the
-# file still holds that token or cannot be read, an unreadable file being
-# taken for this process's own failed write.
+# file still holds that token or cannot be read.
 _unsaved = None
 
 
 def _save_json(path, data):
-    """Write a credential file at owner-only permissions from the outset.
+    """Replace a credential file in one step, owner-only from the outset.
 
-    The mode is set by os.open at creation rather than by a chmod afterwards:
-    a chmod leaves a window in which the token sits in a world-readable file,
-    and no chmod at all leaves it there permanently.
-
-    The mode applies on POSIX. Windows ignores it and governs access by
-    inherited ACLs, so this narrows nothing there - it is not a claim about
-    every platform.
+    Written to a new file beside it, synced, and renamed over it: `os.replace`
+    is atomic within a directory on POSIX, so a reader sees the old file or
+    the new one and never part of either, and a failed write leaves the old
+    one in place. mkstemp creates the file 0600 before anything is written,
+    under a name no other writer shares. A symlink is followed, so the file it
+    points at is the one replaced. A kill between the write and the rename can
+    leave a temp file, at 0600. Windows ignores the mode.
     """
+    path = Path(os.path.realpath(path))
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as handle:
-        # Best-effort: O_TRUNC has already emptied the file, so a
-        # permissions failure must not take the token with it. Skipped where
-        # there is no fchmod - warning on every save on Windows, which has
-        # nothing to narrow, would be noise rather than information.
-        if hasattr(os, "fchmod"):
-            try:
-                os.fchmod(handle.fileno(), 0o600)
-            except OSError:
-                logger.warning("Could not tighten permissions on %s", path.name)
-        handle.write(json.dumps(data, indent=2))
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(json.dumps(data, indent=2))
+            handle.flush()
+            os.fsync(handle.fileno())
+        _replace(tmp, path)
+    except BaseException:
+        # Whatever stops the cleanup, the error to report is the one above.
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+# Windows refuses to replace a file another process has open, and every
+# server sharing the token file opens it on each request. Each read is brief,
+# so a short wait clears it; anywhere else the refusal is a real permission
+# fault and is raised at once.
+_REPLACE_ATTEMPTS = 5
+_REPLACE_BACKOFF_SECONDS = 0.05
+
+
+def _replace(src, dst):
+    for attempt in range(1, _REPLACE_ATTEMPTS + 1):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if sys.platform != "win32" or attempt == _REPLACE_ATTEMPTS:
+                raise
+            time.sleep(_REPLACE_BACKOFF_SECONDS * attempt)
 
 
 def _load_json(path):
@@ -188,7 +211,9 @@ def _save(refreshed, file_token):
     try:
         _save_json(MONZO_TOKENS_PATH, refreshed)
     except OSError:
-        logger.warning("Could not save the refreshed token; holding it until a save succeeds")
+        # Once, when the grant starts being held: the retry runs on every call.
+        if _unsaved is None:
+            logger.warning("Could not save the refreshed token; holding it until a save succeeds")
         _unsaved = (file_token, refreshed)
     else:
         _unsaved = None
@@ -199,12 +224,11 @@ def _refresh_token() -> str:
 
     Checks expiry with a 5-minute buffer. If expired, uses the refresh_token
     grant, and saves the result unless the token file now holds a later usable
-    grant or cannot be read.
+    grant.
 
     The token file is read on every call and the client file on every refresh,
     and nothing is kept between calls: `monzo-mcp auth` replaces them from
-    another process while the server runs. A file that cannot be read is most
-    likely part-way through such a write. The one exception is a grant whose
+    another process while the server runs. The one exception is a grant whose
     save failed, held by `_current_tokens` while the file still holds the
     token it replaced.
     """
@@ -242,15 +266,13 @@ def _refresh_token() -> str:
             # file now holds a different one, a concurrent refresh or
             # `monzo-mcp auth` replaced it, and the next call refreshes from it.
             on_disk = _reread_tokens()
-            if on_disk is None and _unsaved is not None:
-                # The held grant was refused, and the empty file is taken for
-                # this process's own failed write, which holds nothing newer.
-                _unsaved = None
-                logger.error("Token refresh refused with HTTP %s", e.code)
-                raise TokenRefused("Token refresh failed. Run: monzo-mcp auth") from e
             if on_disk is None:
+                # Nothing to compare the refusal with. A held grant was the
+                # token refused, so it goes, and the next call's read of the
+                # file decides.
+                _unsaved = None
                 logger.warning("Token refresh refused while the token file was unreadable")
-                raise RefreshNetworkError("The token file was being replaced.") from e
+                raise RefreshNetworkError("The token file could not be read.") from e
             if on_disk.get("refresh_token") not in (tokens.get("refresh_token"), file_token):
                 _unsaved = None
                 if _usable(on_disk):
@@ -286,14 +308,10 @@ def _refresh_token() -> str:
         "expiry": datetime.now(timezone.utc).timestamp() + new_tokens.get("expires_in", 86400),
     }
 
-    # Saving over a grant written during the request loses it. A file that
-    # cannot be read is most likely part-way through such a write, so it is
-    # left alone too, unless a grant is held: then the file is the one this
-    # process's own failed save emptied.
+    # Saving over a grant written during the request loses it. Anything else is
+    # saved over: saves replace the file in one step, so an unreadable one is
+    # gone or corrupt rather than part-way through being written.
     on_disk = _reread_tokens()
-    if on_disk is None and _unsaved is None:
-        logger.warning("Token file unreadable after refresh; not saving over it")
-        return refreshed["access_token"]
     if on_disk is not None and _replaced_by_a_later_grant(on_disk, tokens):
         logger.warning("Token file was replaced during refresh; using it instead")
         _unsaved = None
@@ -330,6 +348,18 @@ def refresh_token() -> str:
         raise RefreshNetworkError("Could not obtain a token from Monzo.") from e
 
 
+def _save_or_exit(path, data, what):
+    """Save for `setup_auth`, ending in a message rather than a traceback.
+
+    The type, never the text: an OSError's message names this install's paths.
+    """
+    try:
+        _save_json(path, data)
+    except OSError as e:
+        print(f"Error: the {what} could not be saved ({type(e).__name__}).", file=sys.stderr)
+        sys.exit(1)
+
+
 def setup_auth():
     """Interactive OAuth setup. Prompts for credentials, opens browser, exchanges code."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -351,7 +381,7 @@ def setup_auth():
             print("Error: both client_id and client_secret required.", file=sys.stderr)
             sys.exit(1)
         creds = {"client_id": client_id, "client_secret": client_secret}
-        _save_json(MONZO_CLIENT_PATH, creds)
+        _save_or_exit(MONZO_CLIENT_PATH, creds, "credentials")
         print("Credentials saved.")
 
     state = secrets.token_urlsafe(32)
@@ -444,8 +474,11 @@ def setup_auth():
     except (OSError, http.client.HTTPException) as e:
         # Same widening as the refresh path: urlopen wraps only connect-phase
         # failures, so a read timeout arrives bare and a truncated response
-        # raises from http.client, which is not an OSError at all.
-        print(f"Error exchanging code: {e}", file=sys.stderr)
+        # raises from http.client, which is not an OSError at all. The status
+        # or the type, never the text, which for a TLS or file failure names
+        # a path.
+        what = f"HTTP {e.code}" if isinstance(e, urllib.error.HTTPError) else type(e).__name__
+        print(f"Error exchanging code: {what}.", file=sys.stderr)
         sys.exit(1)
 
     try:
@@ -466,7 +499,7 @@ def setup_auth():
         "token_type": tokens.get("token_type", "Bearer"),
         "expiry": datetime.now(timezone.utc).timestamp() + tokens.get("expires_in", 86400),
     }
-    _save_json(MONZO_TOKENS_PATH, token_store)
+    _save_or_exit(MONZO_TOKENS_PATH, token_store, "tokens")
     print("Monzo auth complete. Tokens saved.")
     print("IMPORTANT: Approve the login in your Monzo app within 5 minutes for full access.")
     print("\nAfter approving, use monzo_sync to fetch full transaction history.")
