@@ -67,13 +67,14 @@ def get(path: str) -> dict:
 
     # Parsing is its own failure cause, not a transport one, and it is left to
     # json.loads on the raw bytes so an undecodable body and one that is not
-    # JSON land in the same place: both raise ValueError, which none of the
-    # handlers above catch. The ValueError becomes a MonzoAPIError because the
-    # sync's transactions handler catches only the Monzo types. A bare one there
-    # would stop the run and skip the remaining accounts.
+    # JSON land in the same place: both raise ValueError, and a body nested too
+    # deeply raises RecursionError, which none of the handlers above catch. Each
+    # becomes a MonzoAPIError because the sync's transactions handler catches
+    # only the Monzo types. A bare one there would stop the run and skip the
+    # remaining accounts.
     try:
         body = json.loads(raw)
-    except ValueError as e:
+    except (ValueError, RecursionError) as e:
         raise MonzoAPIError("Monzo returned an unreadable response.") from e
 
     if not isinstance(body, dict):

@@ -127,6 +127,26 @@ class TestAutoRefreshOnExpiry(unittest.TestCase):
         self.assertEqual(result, {"ok": True})
         self.assertEqual(seen["token_posts"], 0)
 
+    def test_a_real_shaped_stored_token_is_sent_as_it_stands(self):
+        token = "eyJh.bG-c_i~O/+= xY"
+        seen = {"token_posts": 0, "auth_headers": []}
+
+        def fake_urlopen(req, timeout=None):
+            if req.full_url == MONZO_TOKEN_URL:
+                seen["token_posts"] += 1
+                return _FakeResp({})
+            seen["auth_headers"].append(req.get_header("Authorization"))
+            return _FakeResp({"ok": True})
+
+        write_credentials(
+            {"access_token": token, "refresh_token": "refresh_1", "expiry": 9_999_999_999},
+            {"client_id": "c", "client_secret": "s"},
+        )
+        with patch("urllib.request.urlopen", fake_urlopen):
+            api.get("/ping")
+
+        self.assertEqual(seen, {"token_posts": 0, "auth_headers": [f"Bearer {token}"]})
+
 
 class TestGetErrorMapping(unittest.TestCase):
     def _get_raising(self, exc):
@@ -214,6 +234,32 @@ class TestRefreshFailuresAreClassified(unittest.TestCase):
             self._get_with_refresh_raising(auth.RefreshNetworkError("/etc/secret/path timed out"))
         self.assertEqual(str(caught.exception), "Network error. Check your connection.")
 
+    def test_a_token_response_with_no_usable_token_is_not_an_auth_failure(self):
+        """Through the real refresh, for what the caller is told, and before
+        any data request can carry the token and come back 401."""
+        for body in (
+            {"error": "blocked"},
+            {"access_token": ""},
+            {"access_token": "", "refresh_token": "refresh_2"},
+        ):
+            with self.subTest(body=body):
+                data_requests = []
+
+                def fake_urlopen(req, timeout=None, body=body, data_requests=data_requests):
+                    if req.full_url != MONZO_TOKEN_URL:
+                        data_requests.append(req)
+                    return _FakeResp(body)
+
+                write_credentials(
+                    {"access_token": "old_tok", "refresh_token": "refresh_1", "expiry": 0},
+                    {"client_id": "cid", "client_secret": "csecret"},
+                )
+                with patch("urllib.request.urlopen", fake_urlopen):
+                    with self.assertRaises(MonzoAPIError) as caught:
+                        api.get("/accounts")
+                self.assertEqual(str(caught.exception), "Network error. Check your connection.")
+                self.assertEqual(data_requests, [])
+
 
 class TestTheRefreshBoundary(unittest.TestCase):
     """Every exit from refresh_token is one of two types, by construction."""
@@ -278,8 +324,13 @@ class TestTheDataRequestParses(unittest.TestCase):
         with self.assertRaises(MonzoAPIError):
             self._get_returning(b'["not", "an", "object"]')
 
+    def test_a_deeply_nested_body_is_reported(self):
+        """It raises RecursionError, which is not a ValueError."""
+        with self.assertRaises(MonzoAPIError):
+            self._get_returning(b"[" * 200_000)
+
     def test_none_of_them_is_reported_as_an_auth_failure(self):
-        for payload in (b"<html>x</html>", b"\xff\xfe", b'["a"]'):
+        for payload in (b"<html>x</html>", b"\xff\xfe", b'["a"]', b"[" * 200_000):
             with self.subTest(payload=payload[:6]):
                 with self.assertRaises(MonzoAPIError) as caught:
                     self._get_returning(payload)

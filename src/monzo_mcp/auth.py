@@ -4,6 +4,7 @@ import contextlib
 import http.client
 import json
 import logging
+import math
 import os
 import secrets
 import socket
@@ -39,6 +40,9 @@ logger = logging.getLogger(__name__)
 # request as an SCA prompt.
 _REFUSAL_CODES = frozenset({400, 401})
 
+# The lifetime assumed for an access token whose reply states none, in seconds.
+_ONE_DAY = 86400
+
 
 class _CallbackServer(HTTPServer):
     """Refuse to share the port the authorisation code arrives on.
@@ -73,9 +77,10 @@ class TokenRefused(MonzoError, RuntimeError):
 class RefreshNetworkError(MonzoError, RuntimeError):
     """Obtaining a token failed without a verdict on the credentials.
 
-    An unreachable server, a rate limit or an unreadable response says nothing
-    about whether the credentials are still good, and telling the user to
-    re-authorise would rewrite a token file the syncing host owns.
+    An unreachable server, a rate limit, or a response that is unreadable or
+    holds no usable token says nothing about whether the credentials are still
+    good, and telling the user to re-authorise would rewrite a token file the
+    syncing host owns.
     """
 
 
@@ -84,10 +89,11 @@ class RefreshNetworkError(MonzoError, RuntimeError):
 # another's.
 _token_lock = threading.Lock()
 
-# A refreshed grant whose save failed: (the refresh token the file held when
-# the save failed, the grant). Monzo rotates the refresh token, so the file's
-# may already be spent and this the only live copy. It is used only while the
-# file still holds that token or cannot be read.
+# What a refresh delivered, if its save failed, perhaps with no access token:
+# (the refresh token the file held when the save failed, the grant). Monzo
+# rotates the refresh token, so the file's may already be spent and this the
+# only live copy. It is used only while the file still holds that token or
+# cannot be read.
 _unsaved = None
 
 
@@ -147,7 +153,7 @@ def _load_json(path):
     """
     try:
         data = json.loads(path.read_text())
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, RecursionError) as e:
         raise TokenRefused(f"{path.name} is missing or unreadable. Run: monzo-mcp auth") from e
     if not isinstance(data, dict):
         raise TokenRefused(f"{path.name} is malformed. Run: monzo-mcp auth")
@@ -162,18 +168,39 @@ def _reread_tokens():
         return None
 
 
-def _expiry(tokens):
-    """The stored expiry, or 0 when it is unusable."""
-    value = tokens.get("expiry", 0)
+def _filled(token):
+    """Whether a token is printable ASCII (RFC 6749's VSCHAR) and not all spaces."""
+    return (
+        isinstance(token, str) and token.isascii() and token.isprintable() and bool(token.strip())
+    )
+
+
+def _finite(value):
+    """`value` if it is a number within float range, or 0."""
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return 0
-    return value
+    try:
+        return value if math.isfinite(value) else 0
+    except OverflowError:
+        return 0
+
+
+def _expiry_after(lifetime):
+    """When a token lasting `lifetime` seconds expires, or 0 if that is not a
+    finite positive number, which counts as already expired."""
+    lifetime = _finite(lifetime)
+    return datetime.now(timezone.utc).timestamp() + lifetime if lifetime > 0 else 0
+
+
+def _expiry(tokens):
+    """The stored expiry, or 0 when it is unusable."""
+    return _finite(tokens.get("expiry", 0))
 
 
 def _usable(tokens):
     """Whether the stored access token can be sent, with the 5-minute buffer."""
     now = datetime.now(timezone.utc).timestamp()
-    return bool(tokens.get("access_token")) and now < _expiry(tokens) - 300
+    return _filled(tokens.get("access_token")) and now < _expiry(tokens) - 300
 
 
 def _replaced_by_a_later_grant(on_disk, tokens):
@@ -184,6 +211,9 @@ def _replaced_by_a_later_grant(on_disk, tokens):
     be live and another copy's usually is not, so saving over that copy is
     what keeps it.
     """
+    if not _filled(tokens.get("access_token")):
+        # `_usable` refreshed this whatever its expiry says, so that is no baseline.
+        tokens = {}
     return _expiry(on_disk) > _expiry(tokens) and _usable(on_disk)
 
 
@@ -238,7 +268,7 @@ def _refresh_token() -> str:
     if _usable(tokens):
         return tokens["access_token"]
 
-    if not tokens.get("refresh_token"):
+    if not _filled(tokens.get("refresh_token")):
         logger.error("Token expired and no refresh token. Run: monzo-mcp auth")
         raise TokenRefused("Token expired and no refresh token. Run: monzo-mcp auth")
 
@@ -297,15 +327,19 @@ def _refresh_token() -> str:
         logger.error("Token refresh got a response that is not JSON")
         raise RefreshNetworkError("Monzo returned an unreadable response.") from e
 
-    if not isinstance(new_tokens, dict) or "access_token" not in new_tokens:
+    if not isinstance(new_tokens, dict):
+        new_tokens = {}
+    new_access = new_tokens.get("access_token")
+    new_refresh = new_tokens.get("refresh_token")
+    has_access = _filled(new_access)
+    if not has_access and not _filled(new_refresh):
         logger.error("Token refresh returned an unexpected response shape")
-        raise TokenRefused("Token refresh failed. Run: monzo-mcp auth")
+        raise RefreshNetworkError("Monzo returned no usable token.")
 
     refreshed = {
-        "access_token": new_tokens["access_token"],
-        "refresh_token": new_tokens.get("refresh_token", tokens["refresh_token"]),
-        "token_type": new_tokens.get("token_type", "Bearer"),
-        "expiry": datetime.now(timezone.utc).timestamp() + new_tokens.get("expires_in", 86400),
+        "access_token": new_access if has_access else "",
+        "refresh_token": new_refresh if _filled(new_refresh) else tokens["refresh_token"],
+        "expiry": _expiry_after(new_tokens.get("expires_in", _ONE_DAY)) if has_access else 0,
     }
 
     # Saving over a grant written during the request loses it. Anything else is
@@ -320,6 +354,11 @@ def _refresh_token() -> str:
     # Keyed to what the file holds now, which may have changed during the
     # request: that is what the next call compares against.
     _save(refreshed, on_disk.get("refresh_token") if on_disk is not None else file_token)
+    if not refreshed["access_token"]:
+        # Saved first: the token sent may be spent, so the one delivered is what
+        # the next call refreshes from.
+        logger.error("Token refresh returned a refresh token but no usable access token")
+        raise RefreshNetworkError("Monzo returned no usable token.")
     return refreshed["access_token"]
 
 
@@ -481,21 +520,26 @@ def setup_auth():
 
     try:
         tokens = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):
         print("Error exchanging code: the response was not readable.", file=sys.stderr)
         sys.exit(1)
 
-    if not isinstance(tokens, dict) or not tokens.get("access_token"):
+    if not isinstance(tokens, dict) or not _filled(tokens.get("access_token")):
         # Checked before indexing: the auth code is single-use, so a raw
         # traceback here costs the user the whole browser flow again.
-        print("Error exchanging code: no token in the response.", file=sys.stderr)
+        print("Error exchanging code: no usable access token in the response.", file=sys.stderr)
         sys.exit(1)
 
+    new_refresh = tokens.get("refresh_token")
+    expiry = _expiry_after(tokens.get("expires_in", _ONE_DAY))
+    if not expiry and not _filled(new_refresh):
+        # Expired at once with nothing to refresh it, the next call is refused,
+        # and running `auth` again meets the same reply.
+        expiry = _expiry_after(_ONE_DAY)
     token_store = {
         "access_token": tokens["access_token"],
-        "refresh_token": tokens.get("refresh_token", ""),
-        "token_type": tokens.get("token_type", "Bearer"),
-        "expiry": datetime.now(timezone.utc).timestamp() + tokens.get("expires_in", 86400),
+        "refresh_token": new_refresh if _filled(new_refresh) else "",
+        "expiry": expiry,
     }
     _save_or_exit(MONZO_TOKENS_PATH, token_store, "tokens")
     print("Monzo auth complete. Tokens saved.")

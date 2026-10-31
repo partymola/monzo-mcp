@@ -9,6 +9,7 @@ exact, not approximate.
 """
 
 import ast
+import http.client
 import inspect
 import io
 import json
@@ -33,6 +34,16 @@ from tests.isolated_files import write_credentials, write_isolated
 NOW_TS = 1_700_000_000
 CREDS = {"client_id": "cid_test", "client_secret": "csecret_test"}
 
+# Fails the token rule: all spaces, a control character, or not ASCII.
+UNSENDABLE_TEXT = ("   ", "a\nb", "a\tb", "a\rb", "a\x00b", "a\x7fb", "café")
+# Passes it: fictional, with punctuation, an inner space and every VSCHAR.
+SENDABLE_TEXT = ("eyJh.bG-c_i~O/+= xY", "a" + "".join(map(chr, range(0x20, 0x7F))))
+UNUSABLE_LIFETIMES = ("21600", None, 10**400, float("inf"), float("nan"), -1, 0, True)
+# Parses on every supported Python. Kept this shallow because, were it ever saved,
+# pretty-printing writes a file growing with the square of its depth.
+NESTED = b"[" * 2_000 + b"]" * 2_000
+SAVED_FIELDS = {"access_token", "refresh_token", "expiry"}
+
 
 class _FixedDatetime(datetime):
     @classmethod
@@ -52,6 +63,43 @@ class _FakeResp:
 
     def read(self):
         return self._body
+
+
+class _RawResp(_FakeResp):
+    """A reply whose read gives `body` as it stands, or raises it."""
+
+    def __init__(self, body):
+        self._body = body
+
+    def read(self):
+        if isinstance(self._body, Exception):
+            raise self._body
+        return self._body
+
+
+class _RotatingTokens:
+    """A token endpoint that enforces rotation: a spent refresh token gets 400.
+
+    The refresh token last issued is the only one that works. A reply carrying
+    no usable one leaves the token sent live, as when something in between
+    answered rather than Monzo.
+    """
+
+    def __init__(self, live, *answers):
+        self.live = live
+        self.answers = list(answers)
+        self.sent = []
+
+    def urlopen(self, req, timeout=None):
+        sent = parse_qs(req.data.decode())["refresh_token"][0]
+        self.sent.append(sent)
+        if sent != self.live:
+            raise urllib.error.HTTPError("https://example.invalid", 400, "no", {}, io.BytesIO(b""))
+        answer = self.answers.pop(0)
+        issued = answer.get("refresh_token")
+        if auth._filled(issued):
+            self.live = issued
+        return _FakeResp(answer)
 
 
 # --------------------------------------------------------------------------- #
@@ -126,7 +174,6 @@ class TestRefreshToken(unittest.TestCase):
         self.assertEqual(saves["expiry"], NOW_TS + 3600)
         self.assertEqual(saves["access_token"], "fresh")
         self.assertEqual(saves["refresh_token"], "r2")
-        self.assertEqual(saves["token_type"], "Bearer")
 
     def test_refresh_keeps_old_refresh_token_when_response_omits_it(self):
         def urlopen(req, timeout=None):
@@ -139,6 +186,24 @@ class TestRefreshToken(unittest.TestCase):
             save_capture=saves,
         )
         self.assertEqual(saves["refresh_token"], "keep_me")
+
+    def test_refresh_keeps_old_refresh_token_when_the_new_one_is_unusable(self):
+        """Saved, an unusable one ends in being told to re-authorise at the next
+        expiry, with the credentials never judged."""
+        for unusable in (None, "", *UNSENDABLE_TEXT, 123):
+            with self.subTest(refresh_token=unusable):
+
+                def urlopen(req, timeout=None, unusable=unusable):
+                    return _FakeResp({"access_token": "fresh", "refresh_token": unusable})
+
+                saves = {}
+                tok = self._refresh(
+                    {"access_token": "stale", "refresh_token": "keep_me", "expiry": 0},
+                    urlopen=urlopen,
+                    save_capture=saves,
+                )
+                self.assertEqual(tok, "fresh")
+                self.assertEqual(saves["refresh_token"], "keep_me")
 
     def test_refresh_defaults_expires_in_to_one_day(self):
         def urlopen(req, timeout=None):
@@ -258,8 +323,6 @@ class TestRefreshToken(unittest.TestCase):
             )
 
     def test_a_non_http_response_is_not_treated_as_a_refusal(self):
-        import http.client
-
         def urlopen(req, timeout=None):
             raise http.client.BadStatusLine("GARBAGE NOT HTTP")
 
@@ -284,20 +347,74 @@ class TestRefreshToken(unittest.TestCase):
                 urlopen=urlopen,
             )
 
-    def test_a_response_of_the_wrong_shape_is_refused(self):
-        def urlopen(req, timeout=None):
-            resp = MagicMock()
-            resp.read.return_value = b'["not", "an", "object"]'
-            cm = MagicMock()
-            cm.__enter__.return_value = resp
-            cm.__exit__.return_value = False
-            return cm
+    def test_a_deeply_nested_response_is_not_treated_as_a_refusal(self):
+        """It raises RecursionError, which only the boundary's catch-all takes."""
 
-        with self.assertRaises(RuntimeError):
+        def urlopen(req, timeout=None):
+            return _RawResp(b"[" * 200_000)
+
+        with self.assertRaises(auth.RefreshNetworkError):
             self._refresh(
                 {"access_token": "stale", "refresh_token": "r1", "expiry": 0},
                 urlopen=urlopen,
             )
+
+    def test_a_response_with_no_usable_token_is_not_treated_as_a_refusal(self):
+        """Monzo reports a refusal with an error status, so a 200 with nothing
+        usable in it says nothing about the credentials. Nothing is saved,
+        because nothing in the reply is worth saving."""
+        for body in (
+            ["not", "an", "object"],
+            {"error": "blocked"},
+            {},
+            None,
+            "text",
+            {"access_token": ""},
+            {"access_token": None},
+            {"access_token": 123},
+            {"access_token": "", "refresh_token": None},
+            {"access_token": "", "refresh_token": 123},
+            *({"access_token": text} for text in UNSENDABLE_TEXT),
+            *({"access_token": "", "refresh_token": text} for text in UNSENDABLE_TEXT),
+        ):
+            with self.subTest(body=body):
+                saves = {}
+
+                def urlopen(req, timeout=None, body=body):
+                    return _FakeResp(body)
+
+                with self.assertRaises(auth.RefreshNetworkError) as ctx:
+                    self._refresh(
+                        {"access_token": "stale", "refresh_token": "r1", "expiry": 0},
+                        urlopen=urlopen,
+                        save_capture=saves,
+                    )
+                # The boundary's catch-all raises the same class with other text.
+                self.assertEqual(str(ctx.exception), "Monzo returned no usable token.")
+                self.assertEqual(saves, {})
+
+    def test_a_response_with_no_usable_token_stays_out_of_the_error_and_the_log(self):
+        """Whatever answered may have put account details in the body, and a
+        refresh token in it is a live credential."""
+        for body in (
+            {"error": "blocked", "detail": "fictional-secret"},
+            {"access_token": "", "refresh_token": "fictional-secret"},
+        ):
+            with self.subTest(body=body):
+
+                def urlopen(req, timeout=None, body=body):
+                    return _FakeResp(body)
+
+                with (
+                    self.assertLogs("monzo_mcp.auth", "DEBUG") as logs,
+                    self.assertRaises(auth.RefreshNetworkError) as ctx,
+                ):
+                    self._refresh(
+                        {"access_token": "stale", "refresh_token": "r1", "expiry": 0},
+                        urlopen=urlopen,
+                    )
+                reported = [str(ctx.exception), *(r.getMessage() for r in logs.records)]
+                self.assertNotIn("fictional-secret", "\n".join(reported))
 
     def test_a_rate_limit_is_not_treated_as_a_refusal(self):
         def urlopen(req, timeout=None):
@@ -375,6 +492,96 @@ class TestTheTokenFileIsTheOnlyCopy(unittest.TestCase):
         self.assertEqual(
             json.loads(auth.MONZO_TOKENS_PATH.read_text())["access_token"], "from_auth"
         )
+
+    def test_a_grant_saved_while_an_unsendable_token_was_refreshed_is_kept(self):
+        """Such a token is refreshed whatever its expiry says, so that expiry can
+        be later than a grant `auth` writes during the request."""
+        for stored in ("", "   ", 123):
+            for reply in (
+                {"access_token": "from_refresh", "refresh_token": "r2"},
+                {"access_token": "", "refresh_token": "r2"},
+            ):
+                with self.subTest(access_token=stored, reply=reply):
+                    self._write_tokens(stored, NOW_TS + 80000)
+
+                    def urlopen(req, timeout=None, reply=reply):
+                        self._write_tokens("from_auth", NOW_TS + 21600, refresh_token="r_auth")
+                        return _FakeResp(reply)
+
+                    with (
+                        patch.object(auth, "datetime", _FixedDatetime),
+                        patch("urllib.request.urlopen", urlopen),
+                    ):
+                        self.assertEqual(auth.refresh_token(), "from_auth")
+                    saved = json.loads(auth.MONZO_TOKENS_PATH.read_text())
+                    self.assertEqual(
+                        (saved["access_token"], saved["refresh_token"]), ("from_auth", "r_auth")
+                    )
+
+    def test_a_refresh_of_an_unsendable_token_saves_over_what_is_not_a_later_usable_grant(self):
+        """The control: with no grant to yield to, the token just issued is the
+        only live one, whatever expiry the file holds."""
+        for stored in ("", "   ", 123):
+            for during in (
+                lambda: None,
+                lambda: self._write_tokens("   ", NOW_TS + 90000, refresh_token="r_copy"),
+                lambda: self._write_tokens("copy", NOW_TS + 100, refresh_token="r_copy"),
+            ):
+                with self.subTest(access_token=stored, during=during):
+                    self._write_tokens(stored, NOW_TS + 80000)
+
+                    def urlopen(req, timeout=None, during=during):
+                        during()
+                        return _FakeResp({"access_token": "from_refresh", "refresh_token": "r2"})
+
+                    with (
+                        patch.object(auth, "datetime", _FixedDatetime),
+                        patch("urllib.request.urlopen", urlopen),
+                    ):
+                        self.assertEqual(auth.refresh_token(), "from_refresh")
+                    saved = json.loads(auth.MONZO_TOKENS_PATH.read_text())
+                    self.assertEqual(
+                        (saved["access_token"], saved["refresh_token"]), ("from_refresh", "r2")
+                    )
+
+    def test_a_refresh_saves_only_what_it_checked(self):
+        """Nothing reads `token_type`, so a reply's value has no reason to reach
+        the file, where a nested one grows with the square of its depth."""
+        for value in (b'"mac"', b"123", NESTED):
+            with self.subTest(value=value[:6]):
+                self._write_tokens("expired", 0)
+                body = b'{"access_token": "good", "refresh_token": "r2", "token_type": %s}' % value
+
+                with patch("urllib.request.urlopen", lambda req, timeout=None: _RawResp(body)):
+                    self.assertEqual(auth.refresh_token(), "good")
+                self.assertEqual(set(json.loads(auth.MONZO_TOKENS_PATH.read_text())), SAVED_FIELDS)
+
+    def test_a_real_shaped_token_is_saved_and_sent(self):
+        """Monzo's tokens are opaque, so punctuation in one must not read as
+        unusable. The file ends up holding what was delivered, the next refresh
+        posts it exactly, and a valid access token is used without a refresh."""
+        for text in SENDABLE_TEXT:
+            with self.subTest(token=text):
+                self._write_tokens("expired", 0, refresh_token="r1")
+                access, refresh = f"{text}A", f"{text}R"
+                tokens = _RotatingTokens(
+                    "r1",
+                    {"access_token": access, "refresh_token": refresh, "expires_in": 3600},
+                    {"access_token": "next", "refresh_token": "r3", "expires_in": 3600},
+                )
+
+                with patch("urllib.request.urlopen", tokens.urlopen):
+                    self.assertEqual(auth.refresh_token(), access)
+                    saved = json.loads(auth.MONZO_TOKENS_PATH.read_text())
+                    self.assertEqual(
+                        (saved["access_token"], saved["refresh_token"]), (access, refresh)
+                    )
+                    self.assertEqual(auth.refresh_token(), access)
+                    self.assertEqual(tokens.sent, ["r1"])
+
+                    self._write_tokens(access, 0, refresh_token=refresh)
+                    self.assertEqual(auth.refresh_token(), "next")
+                self.assertEqual(tokens.sent, ["r1", refresh])
 
     def test_a_refresh_saves_over_a_file_replaced_by_an_older_copy(self):
         """Only a later grant wins. Yielding to an older one returns a token that
@@ -615,6 +822,238 @@ class TestTheTokenFileIsTheOnlyCopy(unittest.TestCase):
             with self.assertRaises(auth.TokenRefused):
                 auth.refresh_token()
         self.assertEqual(len(posts), 2)
+
+    def test_a_response_with_no_usable_token_leaves_a_held_grant_held(self):
+        """It judges nothing, and the held grant is the only live copy. Dropped,
+        the next call sends the file's retired refresh token and is refused."""
+        for truncate in (False, True):
+            with self.subTest(file_emptied_by_the_failed_write=truncate):
+                auth._unsaved = None
+                self._write_tokens("expired", 0, refresh_token="r1")
+                tokens = _RotatingTokens(
+                    "r1",
+                    {"access_token": "short", "refresh_token": "r2", "expires_in": 0},
+                    {"error": "blocked"},
+                    {"access_token": "long", "refresh_token": "r3", "expires_in": 3600},
+                )
+
+                # Three failures: the first refresh's save and the retry before
+                # each later call, so the grant is held throughout.
+                with (
+                    self._fail_saves(3, truncate=truncate),
+                    patch("urllib.request.urlopen", tokens.urlopen),
+                ):
+                    auth.refresh_token()
+                    with self.assertRaises(auth.RefreshNetworkError):
+                        auth.refresh_token()
+                    self.assertEqual(auth.refresh_token(), "long")
+                self.assertEqual(tokens.sent, ["r1", "r2", "r2"])
+                self.assertEqual(
+                    json.loads(auth.MONZO_TOKENS_PATH.read_text())["refresh_token"], "r3"
+                )
+
+    def test_a_response_with_no_usable_token_leaves_the_file_for_the_next_call(self):
+        """Saved over, the file loses the refresh token that is still live."""
+        self._write_tokens("expired", 0, refresh_token="r1")
+        before = auth.MONZO_TOKENS_PATH.read_bytes()
+        tokens = _RotatingTokens(
+            "r1", {"error": "blocked"}, {"access_token": "from_refresh", "refresh_token": "r2"}
+        )
+
+        with patch("urllib.request.urlopen", tokens.urlopen):
+            with self.assertRaises(auth.RefreshNetworkError):
+                auth.refresh_token()
+            self.assertEqual(auth.MONZO_TOKENS_PATH.read_bytes(), before)
+            self.assertEqual(auth.refresh_token(), "from_refresh")
+        self.assertEqual(tokens.sent, ["r1", "r1"])
+
+    def test_a_refresh_token_delivered_without_a_usable_access_token_is_kept(self):
+        """Monzo has spent the token sent, so dropping this one leaves the next
+        call to send a dead token and be told to re-authorise."""
+        for access in ({"access_token": ""}, {"access_token": "   "}, {"access_token": 123}, {}):
+            with self.subTest(access=access):
+                self._write_tokens("expired", 0, refresh_token="r1")
+                tokens = _RotatingTokens(
+                    "r1",
+                    {**access, "refresh_token": "r2"},
+                    {"access_token": "good", "refresh_token": "r3", "expires_in": 3600},
+                )
+
+                with patch("urllib.request.urlopen", tokens.urlopen):
+                    with self.assertRaises(auth.RefreshNetworkError) as ctx:
+                        auth.refresh_token()
+                    self.assertEqual(str(ctx.exception), "Monzo returned no usable token.")
+                    saved = json.loads(auth.MONZO_TOKENS_PATH.read_text())
+                    self.assertEqual(
+                        (saved["access_token"], saved["refresh_token"], saved["expiry"]),
+                        ("", "r2", 0),
+                    )
+                    self.assertEqual(auth.refresh_token(), "good")
+                self.assertEqual(tokens.sent, ["r1", "r2"])
+
+    def test_a_refresh_token_delivered_to_a_held_grant_replaces_it(self):
+        """The held grant's refresh token has just been spent, so this one is
+        the only live copy when the save fails again."""
+        for truncate in (False, True):
+            with self.subTest(file_emptied_by_the_failed_write=truncate):
+                auth._unsaved = None
+                self._write_tokens("expired", 0, refresh_token="r1")
+                tokens = _RotatingTokens(
+                    "r1",
+                    {"access_token": "short", "refresh_token": "r2", "expires_in": 0},
+                    {"access_token": "", "refresh_token": "r3"},
+                    {"access_token": "long", "refresh_token": "r4", "expires_in": 3600},
+                )
+
+                # Four failures: each refresh's save and each retry before the
+                # next call, so the grant is held throughout.
+                with (
+                    self._fail_saves(4, truncate=truncate),
+                    patch("urllib.request.urlopen", tokens.urlopen),
+                ):
+                    auth.refresh_token()
+                    with self.assertRaises(auth.RefreshNetworkError):
+                        auth.refresh_token()
+                    self.assertEqual(auth.refresh_token(), "long")
+                self.assertEqual(tokens.sent, ["r1", "r2", "r3"])
+                self.assertEqual(
+                    json.loads(auth.MONZO_TOKENS_PATH.read_text())["refresh_token"], "r4"
+                )
+
+    def test_a_held_grant_keeps_its_own_refresh_token_when_the_reply_has_no_usable_one(self):
+        """The file's token is the one the held grant replaced, and it is spent."""
+        self._write_tokens("expired", 0, refresh_token="r1")
+        tokens = _RotatingTokens(
+            "r1",
+            {"access_token": "short", "refresh_token": "r2", "expires_in": 0},
+            {"access_token": "long", "refresh_token": None, "expires_in": 3600},
+        )
+
+        with self._fail_saves(2), patch("urllib.request.urlopen", tokens.urlopen):
+            auth.refresh_token()
+            self.assertEqual(auth.refresh_token(), "long")
+        self.assertEqual(json.loads(auth.MONZO_TOKENS_PATH.read_text())["refresh_token"], "r2")
+
+    def test_a_later_grant_wins_over_a_reply_with_only_a_refresh_token(self):
+        """Saved over, the grant written during the request is lost, as it is
+        when the reply is complete."""
+        self._write_tokens("expired", 0)
+
+        def urlopen(req, timeout=None):
+            self._write_tokens("from_auth", 9_999_999_999, refresh_token="r_auth")
+            return _FakeResp({"access_token": "", "refresh_token": "r2"})
+
+        with patch("urllib.request.urlopen", urlopen):
+            self.assertEqual(auth.refresh_token(), "from_auth")
+        self.assertEqual(json.loads(auth.MONZO_TOKENS_PATH.read_text())["refresh_token"], "r_auth")
+
+    def test_a_lifetime_that_is_not_a_finite_positive_number_means_already_expired(self):
+        """The tokens are good, so an unusable lifetime must not lose them or
+        keep an access token past its real expiry. The next call refreshes."""
+        for lifetime in UNUSABLE_LIFETIMES:
+            with self.subTest(expires_in=lifetime):
+                self._write_tokens("expired", 0, refresh_token="r1")
+                tokens = _RotatingTokens(
+                    "r1",
+                    {"access_token": "good", "refresh_token": "r2", "expires_in": lifetime},
+                    {"access_token": "next", "refresh_token": "r3", "expires_in": 3600},
+                )
+
+                with patch("urllib.request.urlopen", tokens.urlopen):
+                    self.assertEqual(auth.refresh_token(), "good")
+                    saved = json.loads(auth.MONZO_TOKENS_PATH.read_text())
+                    self.assertEqual((saved["refresh_token"], saved["expiry"]), ("r2", 0))
+                    self.assertEqual(auth.refresh_token(), "next")
+                self.assertEqual(tokens.sent, ["r1", "r2"])
+
+    def test_a_lifetime_written_as_a_float_is_believed(self):
+        """This package saves its expiries as floats, so the stored one is too."""
+        self._write_tokens("expired", 0, refresh_token="r1")
+        tokens = _RotatingTokens(
+            "r1", {"access_token": "good", "refresh_token": "r2", "expires_in": 21600.0}
+        )
+
+        with (
+            patch.object(auth, "datetime", _FixedDatetime),
+            patch("urllib.request.urlopen", tokens.urlopen),
+        ):
+            self.assertEqual(auth.refresh_token(), "good")
+            saved = json.loads(auth.MONZO_TOKENS_PATH.read_text())
+            self.assertEqual(saved["expiry"], NOW_TS + 21600)
+            self.assertEqual(auth.refresh_token(), "good")
+        self.assertEqual(tokens.sent, ["r1"])
+
+    def test_a_huge_finite_lifetime_is_believed(self):
+        """Deliberate: a cap would be an invented number. Its cost is in AGENTS.md."""
+        self._write_tokens("expired", 0, refresh_token="r1")
+        tokens = _RotatingTokens(
+            "r1", {"access_token": "good", "refresh_token": "r2", "expires_in": 1e300}
+        )
+
+        with patch("urllib.request.urlopen", tokens.urlopen):
+            self.assertEqual(auth.refresh_token(), "good")
+            self.assertEqual(json.loads(auth.MONZO_TOKENS_PATH.read_text())["expiry"], 1e300)
+            self.assertEqual(auth.refresh_token(), "good")
+        self.assertEqual(tokens.sent, ["r1"])
+
+    def test_a_stored_token_that_cannot_be_sent_is_refreshed(self):
+        for stored in (123, *UNSENDABLE_TEXT, ["x"]):
+            with self.subTest(access_token=stored):
+                self._write_tokens(stored, 9_999_999_999, refresh_token="r1")
+                tokens = _RotatingTokens("r1", {"access_token": "good", "refresh_token": "r2"})
+                with patch("urllib.request.urlopen", tokens.urlopen):
+                    self.assertEqual(auth.refresh_token(), "good")
+
+    def test_a_stored_expiry_that_is_not_finite_is_refreshed(self):
+        """Taken as it stands, such an expiry never passes, so the token would
+        never refresh."""
+        for stored in (float("inf"), 10**400):
+            with self.subTest(expiry=stored):
+                self._write_tokens("old", stored, refresh_token="r1")
+                tokens = _RotatingTokens("r1", {"access_token": "good", "refresh_token": "r2"})
+                with patch("urllib.request.urlopen", tokens.urlopen):
+                    self.assertEqual(auth.refresh_token(), "good")
+                self.assertEqual(tokens.sent, ["r1"])
+
+    def test_a_stored_refresh_token_that_cannot_be_sent_is_not_posted(self):
+        for stored in (123, *UNSENDABLE_TEXT, ["x"]):
+            with self.subTest(refresh_token=stored):
+                self._write_tokens("expired", 0, refresh_token=stored)
+                posts = []
+
+                def urlopen(req, timeout=None, posts=posts):
+                    posts.append(req)
+                    return _FakeResp({"access_token": "good", "refresh_token": "r2"})
+
+                with patch("urllib.request.urlopen", urlopen):
+                    with self.assertRaises(auth.TokenRefused):
+                        auth.refresh_token()
+                self.assertEqual(posts, [])
+
+    def test_a_refusal_does_not_use_a_replacement_token_that_cannot_be_sent(self):
+        self._write_tokens("expired", 0)
+
+        def urlopen(req, timeout=None):
+            self._write_tokens(123, 9_999_999_999, refresh_token="r_copy")
+            raise urllib.error.HTTPError("https://example.invalid", 400, "no", {}, io.BytesIO(b""))
+
+        with patch("urllib.request.urlopen", urlopen):
+            with self.assertRaises(auth.RefreshNetworkError):
+                auth.refresh_token()
+
+    def test_a_grant_saved_during_a_response_with_no_usable_token_is_used_next(self):
+        """Nothing is issued to compare with it, so this call does not read the
+        file again and the next call's read decides."""
+        self._write_tokens("expired", 0)
+
+        def urlopen(req, timeout=None):
+            self._write_tokens("from_auth", 9_999_999_999, refresh_token="r_auth")
+            return _FakeResp({"error": "blocked"})
+
+        with patch("urllib.request.urlopen", urlopen):
+            with self.assertRaises(auth.RefreshNetworkError):
+                auth.refresh_token()
+            self.assertEqual(auth.refresh_token(), "from_auth")
 
     def test_a_failed_save_is_reported_once_while_it_is_retried(self):
         """The retry runs on every request, and a sync makes many."""
@@ -872,6 +1311,7 @@ def _run_setup(
     token_raises=None,
     existing_creds=None,
     save_raises=None,
+    token_resp=None,
 ):
     saved = {}
     recorded = []
@@ -900,7 +1340,7 @@ def _run_setup(
         box["token_req"] = req
         if token_raises is not None:
             raise token_raises
-        return _FakeResp(token_response)
+        return token_resp or _FakeResp(token_response)
 
     # Filled from the authorisation URL the code builds, and fed back to the
     # callback. Nothing here stubs the state: a stand-in would let the URL and
@@ -1093,7 +1533,6 @@ class TestSetupAuth(unittest.TestCase):
         stored = result.saved[tokens_path]
         self.assertEqual(stored["access_token"], "at_1")
         self.assertEqual(stored["refresh_token"], "rt_1")
-        self.assertEqual(stored["token_type"], "Bearer")
         self.assertEqual(stored["expiry"], NOW_TS + 21600)
         # SCA window is surfaced to the user.
         self.assertIn("5 minutes", result.stdout)
@@ -1162,6 +1601,217 @@ class TestSetupAuth(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 1)
         self.assertNotIn(tokens_path, result.saved)  # nothing persisted on failure
+
+    def test_a_code_exchange_answered_with_no_usable_token_saves_nothing(self):
+        """The code is spent either way, so `auth` says so rather than report
+        success over a token that cannot be sent."""
+        for body in (
+            ["x"],
+            {},
+            {"refresh_token": "rt"},
+            *(
+                {"access_token": access, "refresh_token": "rt"}
+                for access in (123, "", *UNSENDABLE_TEXT, {}, ["x"])
+            ),
+        ):
+            with self.subTest(body=body):
+                result, _client_path, tokens_path = _run_setup(
+                    client_exists=True,
+                    inputs=[""],
+                    callback_path="/callback?code=good_code&state={state}",
+                    token_response=body,
+                    existing_creds=CREDS,
+                )
+                self.assertEqual(result.exit_code, 1)
+                self.assertEqual(
+                    result.stderr.strip(),
+                    "Error exchanging code: no usable access token in the response.",
+                )
+                self.assertNotIn(tokens_path, result.saved)
+
+    def test_a_code_exchange_keeps_a_real_shaped_token(self):
+        for text in SENDABLE_TEXT:
+            with self.subTest(token=text):
+                result, _client_path, tokens_path = _run_setup(
+                    client_exists=True,
+                    inputs=[""],
+                    callback_path="/callback?code=good_code&state={state}",
+                    token_response={"access_token": f"{text}A", "refresh_token": f"{text}R"},
+                    existing_creds=CREDS,
+                )
+                self.assertIsNone(result.exit_code)
+                stored = result.saved[tokens_path]
+                self.assertEqual(
+                    (stored["access_token"], stored["refresh_token"]), (f"{text}A", f"{text}R")
+                )
+
+    def test_a_code_exchange_answered_with_an_unreadable_body_ends_in_a_message(self):
+        """The code is spent, so a traceback here costs the whole browser flow.
+        A deeply nested body raises RecursionError, which is not a ValueError."""
+        for body in (b"<html>captive portal</html>", b"\xff\xfe", b"[" * 200_000):
+            with self.subTest(body=body[:6]):
+                result, _client_path, tokens_path = _run_setup(
+                    client_exists=True,
+                    inputs=[""],
+                    callback_path="/callback?code=good_code&state={state}",
+                    token_resp=_RawResp(body),
+                    existing_creds=CREDS,
+                )
+                self.assertEqual(result.exit_code, 1)
+                self.assertEqual(
+                    result.stderr.strip(), "Error exchanging code: the response was not readable."
+                )
+                self.assertNotIn(tokens_path, result.saved)
+
+    def test_a_code_exchange_saves_only_what_it_checked(self):
+        for value in (b'"mac"', b"123", NESTED):
+            with self.subTest(value=value[:6]):
+                result, _client_path, tokens_path = _run_setup(
+                    client_exists=True,
+                    inputs=[""],
+                    callback_path="/callback?code=good_code&state={state}",
+                    token_resp=_RawResp(
+                        b'{"access_token": "at", "refresh_token": "rt", "token_type": %s}' % value
+                    ),
+                    existing_creds=CREDS,
+                )
+                self.assertIsNone(result.exit_code)
+                self.assertEqual(set(result.saved[tokens_path]), SAVED_FIELDS)
+
+    def test_a_balanced_deep_exchange_reply_ends_in_a_message(self):
+        """At this depth Python 3.13 raises RecursionError and 3.14 parses it, so
+        the message differs. Neither may end in a traceback or save anything."""
+        depth = 20_000
+        result, _client_path, tokens_path = _run_setup(
+            client_exists=True,
+            inputs=[""],
+            callback_path="/callback?code=good_code&state={state}",
+            token_resp=_RawResp(b"[" * depth + b"]" * depth),
+            existing_creds=CREDS,
+        )
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn(
+            result.stderr.strip(),
+            (
+                "Error exchanging code: the response was not readable.",
+                "Error exchanging code: no usable access token in the response.",
+            ),
+        )
+        self.assertNotIn(tokens_path, result.saved)
+
+    def test_a_truncated_exchange_reply_reports_its_type(self):
+        """These come from http.client and are not OSError, and the read of the
+        body can raise them as well as the request."""
+        for failure in (
+            http.client.IncompleteRead(b"partial"),
+            http.client.BadStatusLine("garbage"),
+            http.client.LineTooLong("header line"),
+        ):
+            for how in ({"token_raises": failure}, {"token_resp": _RawResp(failure)}):
+                with self.subTest(failure=type(failure).__name__, how=sorted(how)):
+                    result, _client_path, tokens_path = _run_setup(
+                        client_exists=True,
+                        inputs=[""],
+                        callback_path="/callback?code=good_code&state={state}",
+                        existing_creds=CREDS,
+                        **how,
+                    )
+                    self.assertEqual(result.exit_code, 1)
+                    self.assertEqual(
+                        result.stderr.strip(),
+                        f"Error exchanging code: {type(failure).__name__}.",
+                    )
+                    self.assertNotIn(tokens_path, result.saved)
+
+    def test_a_code_exchange_stores_no_refresh_token_it_could_not_send(self):
+        for unusable in (None, *UNSENDABLE_TEXT, 123):
+            with self.subTest(refresh_token=unusable):
+                result, _client_path, tokens_path = _run_setup(
+                    client_exists=True,
+                    inputs=[""],
+                    callback_path="/callback?code=good_code&state={state}",
+                    token_response={"access_token": "at", "refresh_token": unusable},
+                    existing_creds=CREDS,
+                )
+                self.assertIsNone(result.exit_code)
+                self.assertEqual(result.saved[tokens_path]["refresh_token"], "")
+
+    def test_a_code_exchange_defaults_expires_in_to_one_day(self):
+        result, _client_path, tokens_path = _run_setup(
+            client_exists=True,
+            inputs=[""],
+            callback_path="/callback?code=good_code&state={state}",
+            token_response={"access_token": "at", "refresh_token": "rt"},
+            existing_creds=CREDS,
+        )
+        self.assertEqual(result.saved[tokens_path]["expiry"], NOW_TS + 86400)
+
+    def test_a_code_exchange_takes_a_lifetime_written_as_a_float(self):
+        result, _client_path, tokens_path = _run_setup(
+            client_exists=True,
+            inputs=[""],
+            callback_path="/callback?code=good_code&state={state}",
+            token_response={"access_token": "at", "refresh_token": "rt", "expires_in": 21600.0},
+            existing_creds=CREDS,
+        )
+        self.assertEqual(result.saved[tokens_path]["expiry"], NOW_TS + 21600)
+
+    def test_a_grant_with_no_refresh_token_and_an_unusable_lifetime_is_used(self):
+        """Saved as already expired with nothing to refresh it, the next call is
+        refused, and running `auth` again meets the same reply."""
+        for lifetime in UNUSABLE_LIFETIMES:
+            for refresh in ({}, {"refresh_token": None}, {"refresh_token": "   "}):
+                with self.subTest(expires_in=lifetime, refresh=refresh):
+                    result, _client_path, tokens_path = _run_setup(
+                        client_exists=True,
+                        inputs=[""],
+                        callback_path="/callback?code=good_code&state={state}",
+                        token_response={"access_token": "at", "expires_in": lifetime, **refresh},
+                        existing_creds=CREDS,
+                    )
+                    self.assertIsNone(result.exit_code)
+                    stored = result.saved[tokens_path]
+                    self.assertEqual(
+                        (stored["access_token"], stored["refresh_token"], stored["expiry"]),
+                        ("at", "", NOW_TS + 86400),
+                    )
+                    write_credentials(stored, CREDS)
+                    with patch.object(auth, "datetime", _FixedDatetime):
+                        self.assertEqual(auth.refresh_token(), "at")
+
+    def test_a_grant_with_no_refresh_token_keeps_the_lifetime_it_states(self):
+        result, _client_path, tokens_path = _run_setup(
+            client_exists=True,
+            inputs=[""],
+            callback_path="/callback?code=good_code&state={state}",
+            token_response={"access_token": "at", "expires_in": 3600},
+            existing_creds=CREDS,
+        )
+        self.assertEqual(result.saved[tokens_path]["expiry"], NOW_TS + 3600)
+
+    def test_a_code_exchange_with_an_unusable_lifetime_keeps_the_tokens(self):
+        """The code is spent, so a traceback here costs the whole browser flow.
+        Saved as already expired, with a refresh token the next request refreshes
+        from."""
+        for lifetime in UNUSABLE_LIFETIMES:
+            with self.subTest(expires_in=lifetime):
+                result, _client_path, tokens_path = _run_setup(
+                    client_exists=True,
+                    inputs=[""],
+                    callback_path="/callback?code=good_code&state={state}",
+                    token_response={
+                        "access_token": "at",
+                        "refresh_token": "rt",
+                        "expires_in": lifetime,
+                    },
+                    existing_creds=CREDS,
+                )
+                self.assertIsNone(result.exit_code)
+                stored = result.saved[tokens_path]
+                self.assertEqual(
+                    (stored["access_token"], stored["refresh_token"], stored["expiry"]),
+                    ("at", "rt", 0),
+                )
 
     def test_a_transport_failure_reports_its_type_not_its_text(self):
         """A TLS or file failure's own text names a path on this machine."""
@@ -1248,299 +1898,14 @@ class TestCredentialFilesAreRefusals(unittest.TestCase):
         with self.assertRaises(auth.TokenRefused):
             self._refresh_with_files(tokens="{not json")
 
+    def test_a_token_file_nested_too_deeply_to_parse_is_a_refusal(self):
+        """It raises RecursionError, which is not a ValueError."""
+        with self.assertRaises(auth.TokenRefused):
+            self._refresh_with_files(tokens="[" * 200_000)
+
     def test_a_token_file_of_the_wrong_shape_is_a_refusal(self):
         with self.assertRaises(auth.TokenRefused):
             self._refresh_with_files(tokens='["not", "an", "object"]')
-
-
-@unittest.skipIf(sys.platform == "win32", "POSIX mode bits; Windows uses ACLs")
-class TestCredentialFilesAreOwnerOnly(unittest.TestCase):
-    """A token file must never be readable by other local users.
-
-    mkstemp creates the file 0600. A plain open follows the umask, which by
-    default gives 0644, for a file holding a refresh token.
-
-    POSIX only: on Windows the mode mkstemp asks for is ignored and access is
-    governed by inherited ACLs, so the assertions below would fail there for a
-    reason that says nothing about this code.
-    """
-
-    def test_a_new_token_file_is_created_owner_only(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            target = pathlib.Path(tmp) / "monzo_tokens.json"
-            auth._save_json(target, {"refresh_token": "fictional"})
-            self.assertEqual(oct(target.stat().st_mode & 0o777), "0o600")
-
-    def test_rewriting_does_not_loosen_an_existing_file(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            target = pathlib.Path(tmp) / "monzo_tokens.json"
-            auth._save_json(target, {"refresh_token": "first"})
-            auth._save_json(target, {"refresh_token": "second"})
-            self.assertEqual(oct(target.stat().st_mode & 0o777), "0o600")
-            self.assertEqual(json.loads(target.read_text())["refresh_token"], "second")
-
-
-class TestTheTokenFileIsReplacedInOneStep(unittest.TestCase):
-    """A reader sees the old file or the new one, never part of either.
-
-    A truncate-and-write save shows every reader an empty or partial file for
-    the length of the write, and a failure part-way leaves it that way, after
-    Monzo has already rotated the refresh token it held.
-    """
-
-    def setUp(self):
-        self._dir = tempfile.TemporaryDirectory()
-        # Resolved: the save follows symlinks, and on macOS the temp directory
-        # sits behind one.
-        self.dir = pathlib.Path(os.path.realpath(self._dir.name))
-        self.path = self.dir / "monzo_tokens.json"
-
-    def tearDown(self):
-        self._dir.cleanup()
-
-    @staticmethod
-    def _writes_that(action):
-        """An `os.fdopen` whose handle calls `action(fd)` before each write."""
-        real_fdopen = os.fdopen
-
-        class _Handle:
-            def __init__(self, handle):
-                self._handle = handle
-
-            def __enter__(self):
-                self._handle.__enter__()
-                return self
-
-            def __exit__(self, *exc):
-                return self._handle.__exit__(*exc)
-
-            def write(self, text):
-                action(self._handle.fileno())
-                return self._handle.write(text)
-
-            def __getattr__(self, name):
-                return getattr(self._handle, name)
-
-        return patch.object(
-            auth.os, "fdopen", lambda fd, *a, **k: _Handle(real_fdopen(fd, *a, **k))
-        )
-
-    def test_the_target_holds_the_whole_old_file_until_the_new_one_replaces_it(self):
-        self.path.write_text('{"refresh_token": "old"}')
-        seen = []
-        real_replace = os.replace
-
-        def spy(src, dst):
-            seen.append((self.path.read_text(), json.loads(pathlib.Path(src).read_text())))
-            return real_replace(src, dst)
-
-        with patch.object(auth.os, "replace", spy):
-            auth._save_json(self.path, {"refresh_token": "new"})
-
-        self.assertEqual(seen, [('{"refresh_token": "old"}', {"refresh_token": "new"})])
-        self.assertEqual(json.loads(self.path.read_text()), {"refresh_token": "new"})
-
-    def test_a_failed_write_leaves_the_old_file_and_nothing_else(self):
-        """The temp file holds the new refresh token, so one left behind is a
-        live credential lying in the config directory."""
-        for failure in (OSError(28, "No space left on device"), KeyboardInterrupt()):
-            with self.subTest(failure=type(failure).__name__):
-                self.path.write_text('{"refresh_token": "old"}')
-
-                def fail(fd, failure=failure):
-                    raise failure
-
-                with self._writes_that(fail), self.assertRaises(type(failure)):
-                    auth._save_json(self.path, {"refresh_token": "new"})
-
-                self.assertEqual(self.path.read_text(), '{"refresh_token": "old"}')
-                self.assertEqual(list(self.dir.iterdir()), [self.path])
-
-    def test_a_failed_replace_leaves_the_old_file_and_nothing_else(self):
-        self.path.write_text('{"refresh_token": "old"}')
-
-        def refuse(src, dst):
-            raise OSError(13, "Permission denied")
-
-        with patch.object(auth.os, "replace", refuse), self.assertRaises(OSError):
-            auth._save_json(self.path, {"refresh_token": "new"})
-
-        self.assertEqual(self.path.read_text(), '{"refresh_token": "old"}')
-        self.assertEqual(list(self.dir.iterdir()), [self.path])
-
-    @unittest.skipIf(sys.platform == "win32", "POSIX mode bits; Windows uses ACLs")
-    def test_the_new_file_is_owner_only_before_the_token_is_written(self):
-        """Checked at the write: a chmod at any point after it gives the same
-        final mode while leaving the token readable in between."""
-        seen = []
-        with self._writes_that(lambda fd: seen.append(oct(os.fstat(fd).st_mode & 0o777))):
-            auth._save_json(self.path, {"refresh_token": "fictional"})
-
-        self.assertEqual(seen, ["0o600"])
-
-    @unittest.skipIf(sys.platform == "win32", "POSIX mode bits; Windows uses ACLs")
-    def test_a_loose_existing_file_is_replaced_by_an_owner_only_one(self):
-        """Files written by a release that set no mode can be world-readable."""
-        self.path.write_text("{}")
-        os.chmod(self.path, 0o644)
-        auth._save_json(self.path, {"refresh_token": "fictional"})
-        self.assertEqual(oct(self.path.stat().st_mode & 0o777), "0o600")
-
-    def test_each_save_publishes_its_own_temp_file_from_the_same_directory(self):
-        """A fixed temp name lets one writer publish another's half-written
-        file, and a rename from another directory is not atomic."""
-        published = []
-        real_replace = os.replace
-
-        def spy(src, dst):
-            published.append(pathlib.Path(src))
-            return real_replace(src, dst)
-
-        with patch.object(auth.os, "replace", spy):
-            auth._save_json(self.path, {"refresh_token": "a"})
-            auth._save_json(self.path, {"refresh_token": "b"})
-
-        self.assertEqual(len(set(published)), 2)
-        self.assertTrue(all(p.parent == self.dir and p != self.path for p in published))
-
-    @unittest.skipIf(sys.platform == "win32", "symlinks need privileges on Windows")
-    def test_a_symlinked_token_file_is_saved_where_the_link_points(self):
-        """Replacing the link would leave its target, which anything else using
-        the real path reads, on a refresh token already spent."""
-        real = self.dir / "secrets" / "monzo_tokens.json"
-        real.parent.mkdir()
-        real.write_text('{"refresh_token": "old"}')
-        self.path.symlink_to(real)
-        published = []
-        real_replace = os.replace
-
-        def spy(src, dst):
-            published.append(pathlib.Path(src).parent)
-            return real_replace(src, dst)
-
-        with patch.object(auth.os, "replace", spy):
-            auth._save_json(self.path, {"refresh_token": "new"})
-
-        self.assertTrue(self.path.is_symlink())
-        self.assertEqual(json.loads(real.read_text()), {"refresh_token": "new"})
-        # Beside the real file, since a rename cannot cross filesystems.
-        self.assertEqual(published, [real.parent])
-
-    def test_a_failed_cleanup_does_not_hide_why_the_save_failed(self):
-        """A scanner can block the unlink as well as the replace on Windows."""
-
-        def refuse_replace(src, dst):
-            raise OSError(28, "No space left on device")
-
-        def refuse_unlink(path):
-            raise PermissionError(13, "Access is denied")
-
-        with (
-            patch.object(auth.os, "replace", refuse_replace),
-            patch.object(auth.os, "unlink", refuse_unlink),
-            self.assertRaises(OSError) as raised,
-        ):
-            auth._save_json(self.path, {"refresh_token": "new"})
-        self.assertEqual(raised.exception.errno, 28)
-
-    def test_the_new_file_is_synced_before_it_replaces_the_old_one(self):
-        """Unsynced, a crash soon after the rename can leave an empty file on
-        some filesystems, after the refresh token it replaced was spent."""
-        data = {"refresh_token": "new"}
-        events = []
-        real_fsync, real_replace = os.fsync, os.replace
-
-        def fsync(fd):
-            # The whole file has to be in it by now, or the sync covers less.
-            events.append(("fsync", os.fstat(fd).st_size))
-            return real_fsync(fd)
-
-        def replace(src, dst):
-            events.append(("replace", None))
-            return real_replace(src, dst)
-
-        with patch.object(auth.os, "fsync", fsync), patch.object(auth.os, "replace", replace):
-            auth._save_json(self.path, data)
-
-        # Against the saved file rather than the JSON: Windows writes `\r\n`.
-        self.assertEqual(events, [("fsync", self.path.stat().st_size), ("replace", None)])
-        self.assertGreater(self.path.stat().st_size, 0)
-
-    @unittest.skipUnless(sys.platform == "win32", "the sharing rule being retried is Windows'")
-    def test_a_save_waits_out_a_reader_holding_the_file_open(self):
-        """The real refusal, not a stand-in for it: a reader holds the file
-        while the save runs, and lets go within the retries."""
-        refused = []
-        real_replace = os.replace
-
-        def watch(src, dst):
-            try:
-                return real_replace(src, dst)
-            except PermissionError:
-                refused.append(src)
-                raise
-
-        self.path.write_text('{"refresh_token": "old"}')
-        reader = open(self.path)
-        timer = threading.Timer(0.1, reader.close)
-        timer.start()
-        try:
-            with patch.object(auth.os, "replace", watch):
-                auth._save_json(self.path, {"refresh_token": "new"})
-        finally:
-            timer.join()
-            reader.close()
-        self.assertEqual(json.loads(self.path.read_text()), {"refresh_token": "new"})
-        # Without a refusal this proves nothing about the retry.
-        self.assertTrue(refused, "Windows replaced a file another process had open")
-
-    def test_windows_retries_a_replace_another_reader_is_blocking(self):
-        """Windows refuses to replace a file another process has open, and a
-        server sharing the file opens it on every request; `auth` cannot redo
-        the save once the authorisation code is spent."""
-        attempts = []
-        real_replace = os.replace
-
-        def busy_twice(src, dst):
-            attempts.append(src)
-            if len(attempts) <= 2:
-                raise PermissionError(13, "Access is denied")
-            return real_replace(src, dst)
-
-        with (
-            patch.object(auth.sys, "platform", "win32"),
-            patch.object(auth.os, "replace", busy_twice),
-            patch.object(auth.time, "sleep") as sleep,
-        ):
-            auth._save_json(self.path, {"refresh_token": "new"})
-
-        self.assertEqual(len(attempts), 3)
-        self.assertEqual(json.loads(self.path.read_text()), {"refresh_token": "new"})
-        # Back-to-back retries would be over before a reader let go.
-        delays = [call.args[0] for call in sleep.call_args_list]
-        self.assertEqual(len(delays), 2)
-        self.assertTrue(0 < delays[0] < delays[1], delays)
-
-    def test_a_refused_replace_is_not_retried_elsewhere_or_forever(self):
-        """Off Windows the refusal is a real permission fault, and on Windows a
-        file that stays locked has to fail rather than hang the server."""
-        for platform, expected in (("linux", 1), ("win32", auth._REPLACE_ATTEMPTS)):
-            with self.subTest(platform=platform):
-                attempts = []
-
-                def refuse(src, dst, attempts=attempts):
-                    attempts.append(src)
-                    raise PermissionError(13, "Access is denied")
-
-                with (
-                    patch.object(auth.sys, "platform", platform),
-                    patch.object(auth.os, "replace", refuse),
-                    patch.object(auth.time, "sleep"),
-                    self.assertRaises(PermissionError),
-                ):
-                    auth._save_json(self.path, {"refresh_token": "new"})
-                self.assertEqual(len(attempts), expected)
-                self.assertEqual(list(self.dir.iterdir()), [])
 
 
 class TestWhereTheCallbackServerBinds(unittest.TestCase):
