@@ -576,8 +576,8 @@ class TestAnUnreadableResponseIsNotAnSCAPrompt(unittest.TestCase):
     """Only an SCA refusal earns the SCA note, and a failed sync is not "ok".
 
     Telling the user to approve something in the Monzo app is the wrong
-    answer to a dropped connection, and logging the run as ok suppresses the
-    retry for the rest of the day.
+    answer to a dropped connection. Logging the run as ok would leave no
+    record that it failed.
     """
 
     def _run_with_transactions_failing(self, exc):
@@ -656,10 +656,8 @@ class TestAnUnreadableResponseIsNotAnSCAPrompt(unittest.TestCase):
 class TestALaterPageFailingIsAlsoAFailure(unittest.TestCase):
     """Page 0 is not the only page, and a hole in the history is not a success.
 
-    A later page failing used to break out of the loop recording nothing, so
-    the run was logged ok with whatever it had managed to fetch, and the
-    throttle then suppressed the next sync for the rest of the day over a
-    partial cache.
+    A failure other than SCA on a later page is recorded as an error, so the
+    run is not logged ok over a partial cache.
     """
 
     def test_a_failure_on_a_later_page_is_recorded(self):
@@ -736,7 +734,7 @@ class TestTheAutoSyncThrottleCountsAttempts(unittest.TestCase):
         assert self._runs_after_a_failure_today() == 0
 
     def test_a_local_date_ahead_of_utc_does_not_defeat_the_throttle(self):
-        """log_sync stores UTC; comparing it to a local date reopens the storm.
+        """log_sync stores UTC, so comparing it to a local date defeats the throttle.
 
         East of Greenwich there is a window each night where the row just
         written is dated behind the local today, so the gate never closes and
@@ -765,8 +763,8 @@ class TestTheAutoSyncThrottleCountsAttempts(unittest.TestCase):
             @classmethod
             def now(cls, tz=None):
                 # A naive now() must differ, or the fixture cannot tell
-                # datetime.now(timezone.utc) from datetime.now() - and the
-                # latter is the shorter path back to exactly this bug.
+                # datetime.now(timezone.utc) from datetime.now(), and the
+                # latter gives the local date this test guards against.
                 if tz is None:
                     return datetime(2026, 8, 10, 0, 35)
                 return datetime(2026, 8, 9, 23, 35, tzinfo=timezone.utc)
@@ -862,8 +860,8 @@ class TestTheAutoSyncThrottleCountsAttempts(unittest.TestCase):
 class TestNoExceptionTextReachesTheModel(unittest.TestCase):
     """A bare except cannot know what its message set holds.
 
-    These details are returned to the model, so they carry the type only -
-    the same rule the trailing catch-all already follows.
+    The balance and pots errors are returned to the model, so they carry the
+    type only. The trailing catch-all does the same for its sync_log row.
     """
 
     def _details_when_balance_and_pots_fail(self, exc):
@@ -1004,9 +1002,7 @@ class TestEveryExitFromRunSyncLeavesARow(unittest.TestCase):
 class TestSCAIsNotAFailureOnAnyPage(unittest.TestCase):
     """Only the user approving in the Monzo app changes an SCA outcome.
 
-    Logging it as a failure would have the throttle retry something no
-    retry can fix. The page-0 branch always did this; the later-page branch
-    did not exist until it was added, and briefly logged SCA as an error.
+    SCA on a later page is a note and the run is logged ok.
     """
 
     def _run_with_sca_on_page(self, page_index):
@@ -1055,9 +1051,9 @@ class TestSCAIsNotAFailureOnAnyPage(unittest.TestCase):
 class TestAnUnnamedFailureStillLeavesASyncLogRow(unittest.TestCase):
     """MonzoAuthError is a sibling of the two types the loop names, not a parent.
 
-    It escaped run_sync leaving sync_log - the only record a run leaves -
-    empty, so nothing showed that syncing had stopped, and the throttle did
-    not count the attempt.
+    The trailing catch-all records it in sync_log, the only record a run
+    leaves, so the throttle counts the attempt and something shows that
+    syncing stopped.
     """
 
     def _statuses_after(self, exc):

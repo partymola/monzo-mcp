@@ -71,18 +71,17 @@ class TokenRefused(MonzoError, RuntimeError):
 
 
 class RefreshNetworkError(MonzoError, RuntimeError):
-    """The refresh request never got an answer.
+    """Obtaining a token failed without a verdict on the credentials.
 
-    Keeps RuntimeError so existing callers are unaffected, but is
-    distinguishable: an unreachable server says nothing about whether the
-    credentials are still good, and telling the user to re-authorise would
-    rewrite a token file the syncing host owns.
+    An unreachable server, a rate limit or an unreadable response says nothing
+    about whether the credentials are still good, and telling the user to
+    re-authorise would rewrite a token file the syncing host owns.
     """
 
 
-# Tool calls run in worker threads. Without this, one can read the token file
-# while another is half-way through saving it, and two can spend the same
-# refresh token.
+# Tool calls run in worker threads. Without this, two can spend the same
+# refresh token, and one call's read, compare and save can interleave with
+# another's.
 _token_lock = threading.Lock()
 
 # A refreshed grant whose save failed: (the refresh token the file held when
@@ -260,7 +259,8 @@ def _refresh_token() -> str:
     except urllib.error.HTTPError as e:
         # Checked before OSError, which it subclasses. Listed by what the code
         # says about the credentials rather than by range: a bad grant is
-        # refused with 400/401/403, while 429 carries no judgement at all.
+        # refused with 400 and a bad client with 401, while 403 (a WAF) and 429
+        # carry no judgement at all.
         if e.code in _REFUSAL_CODES:
             # A refusal judges the refresh token sent and nothing else. If the
             # file now holds a different one, a concurrent refresh or
@@ -329,10 +329,9 @@ def refresh_token() -> str:
     The boundary that classifies every way obtaining a token can fail. Only
     TokenRefused means the credentials were rejected; everything else becomes
     RefreshNetworkError, by construction rather than by listing the exception
-    types that happen to occur. Enumerating them is what went wrong before:
-    each round of fixes found another type nobody had thought of - a bare
-    OSError, an http.client exception that is not an OSError at all, a decode
-    failure that is a ValueError - and each was graded a dead credential.
+    types that happen to occur. A list can miss one, such as a bare OSError, an
+    http.client exception that is not an OSError at all, or a decode failure
+    that is a ValueError. A missed type would escape api.get unclassified.
 
     A bug inside the refresh therefore reports as a network failure rather
     than a refusal. That is the safe direction: it is still recorded and still
@@ -431,8 +430,8 @@ def setup_auth():
         def log_message(self, format, *a):
             pass
 
-    # Bind before opening the browser: the listener no longer asks to share the
-    # port, so a busy one is now a real failure, and sending the user to an
+    # Bind before opening the browser: the listener does not ask to share the
+    # port, so a busy one is a real failure, and sending the user to an
     # authorisation page whose redirect has nowhere to land wastes the attempt.
     try:
         server = _CallbackServer((MONZO_CALLBACK_HOST, MONZO_CALLBACK_PORT), CallbackHandler)
@@ -472,11 +471,10 @@ def setup_auth():
         with urllib.request.urlopen(req, timeout=15) as resp:
             raw = resp.read()
     except (OSError, http.client.HTTPException) as e:
-        # Same widening as the refresh path: urlopen wraps only connect-phase
-        # failures, so a read timeout arrives bare and a truncated response
-        # raises from http.client, which is not an OSError at all. The status
-        # or the type, never the text, which for a TLS or file failure names
-        # a path.
+        # urlopen wraps only connect-phase failures in URLError, so a read
+        # timeout arrives bare and a truncated response raises from http.client,
+        # which is not an OSError at all. The status or the type is reported,
+        # never the text.
         what = f"HTTP {e.code}" if isinstance(e, urllib.error.HTTPError) else type(e).__name__
         print(f"Error exchanging code: {what}.", file=sys.stderr)
         sys.exit(1)

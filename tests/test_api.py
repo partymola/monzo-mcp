@@ -183,11 +183,9 @@ class TestReadOnlyContract(unittest.TestCase):
 class TestRefreshFailuresAreClassified(unittest.TestCase):
     """api.get maps the two types refresh_token guarantees, and nothing else.
 
-    It used to catch a tuple of builtins, so the classification depended on
-    remembering every type auth could raise - which is how a bare OSError, an
-    http.client exception and a decode failure were each graded a dead
-    credential in turn. Monzo rotates the refresh token on use and the token
-    file is shared, so that answer is the destructive one.
+    It catches no builtin exception types around the refresh. Monzo rotates the
+    refresh token on use and the token file is shared, so grading a transient
+    fault a dead credential is the destructive answer.
     """
 
     def _get_with_refresh_raising(self, exc):
@@ -252,10 +250,9 @@ class TestTheRefreshBoundary(unittest.TestCase):
 class TestTheDataRequestParses(unittest.TestCase):
     """The data request reads and parses, each with its own failures.
 
-    Earlier rounds enumerated exception types arriving at the refresh
-    boundary, so this site was never in scope: a proxy answering an API call
-    with HTML raised ValueError past every handler and escaped the sync loop,
-    which catches only the Monzo types.
+    A proxy answering an API call with HTML becomes a MonzoAPIError. The sync's
+    transactions handler catches only the Monzo types, so a bare ValueError
+    would stop the run and skip the remaining accounts.
     """
 
     def _get_returning(self, payload):
@@ -301,7 +298,7 @@ class TestTheDataRequestParses(unittest.TestCase):
                 api.get("/accounts")
 
     def test_a_truncated_response_is_reported_not_escaped(self):
-        """http.client exceptions are not OSError, so they escaped every tuple."""
+        """BadStatusLine and IncompleteRead are not OSError, so OSError alone misses them."""
         import http.client
 
         with (

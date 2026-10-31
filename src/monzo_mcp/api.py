@@ -59,17 +59,18 @@ def get(path: str) -> dict:
             raise MonzoSCAError("SCA required - approve in Monzo app") from e
         raise MonzoAPIError(f"Monzo API error {e.code}") from e
     except (OSError, http.client.HTTPException) as e:
-        # Wider than URLError, for the reason auth.py already documents:
-        # urlopen wraps only connect-phase failures in it, so a read timeout
-        # or a reset connection arrives bare, and a truncated response raises
-        # from http.client, which is not an OSError at all.
+        # URLError alone is too narrow: urlopen wraps only connect-phase
+        # failures in it, so a read timeout or a reset connection arrives
+        # bare, and a truncated response raises from http.client, which is not
+        # an OSError at all.
         raise MonzoAPIError("Network error. Check your connection.") from e
 
     # Parsing is its own failure cause, not a transport one, and it is left to
     # json.loads on the raw bytes so an undecodable body and one that is not
     # JSON land in the same place: both raise ValueError, which none of the
-    # handlers above catch. Either used to escape the sync loop, whose handlers
-    # are for the Monzo types, leaving no record that syncing had stopped.
+    # handlers above catch. The ValueError becomes a MonzoAPIError because the
+    # sync's transactions handler catches only the Monzo types. A bare one there
+    # would stop the run and skip the remaining accounts.
     try:
         body = json.loads(raw)
     except ValueError as e:

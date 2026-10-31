@@ -241,7 +241,7 @@ class TestRefreshToken(unittest.TestCase):
             )
 
     def test_an_undecodable_body_is_not_treated_as_a_refusal(self):
-        """UnicodeDecodeError is a ValueError, which used to read as a refusal."""
+        """A response body that will not decode is not a refusal."""
 
         def urlopen(req, timeout=None):
             resp = MagicMock()
@@ -1005,8 +1005,8 @@ class TestTheCallbackStateIsChecked(unittest.TestCase):
 
         Reading `secrets.token_urlsafe` back in a test proves a property of
         Python. What has to hold is that the URL carries something long, not
-        derived from the clock, and different every run - the timestamp this
-        replaced satisfied none of those and would still have been compared.
+        derived from the clock, and different every run. A timestamp in whole
+        seconds fails both the length check and the digit check below.
         """
         runs = [self._completed_run(), self._completed_run()]
         self.assertNotEqual(runs[0].state, runs[1].state)
@@ -1230,10 +1230,9 @@ class TestCredentialFilesAreRefusals(unittest.TestCase):
         if tokens is not None:
             tokens_path.write_text(tokens)
         creds_path.write_text(creds)
-        # Deliberate, not left over now that conftest isolates these paths as
-        # well: the files written above are the ones under test, and without
-        # the patches `auth` would read conftest's empty directory instead -
-        # so every case here would exercise the missing-file branch and still
+        # The files written above are the ones under test. Without the
+        # patches `auth` would read conftest's empty directory instead, so
+        # every case here would exercise the missing-file branch and still
         # pass, `_load_json` reporting missing and unparseable alike.
         with (
             patch.object(auth, "MONZO_TOKENS_PATH", tokens_path),
@@ -1258,11 +1257,11 @@ class TestCredentialFilesAreRefusals(unittest.TestCase):
 class TestCredentialFilesAreOwnerOnly(unittest.TestCase):
     """A token file must never be readable by other local users.
 
-    This one had no chmod at all, so the file kept whatever the umask gave it -
-    0644 on a default umask, permanently, for a file holding a refresh token.
+    mkstemp creates the file 0600. A plain open follows the umask, which by
+    default gives 0644, for a file holding a refresh token.
 
-    POSIX only: on Windows the mode passed to os.open is ignored and access is
-    governed by inherited ACLs, so the assertion below would fail there for a
+    POSIX only: on Windows the mode mkstemp asks for is ignored and access is
+    governed by inherited ACLs, so the assertions below would fail there for a
     reason that says nothing about this code.
     """
 
@@ -1550,7 +1549,7 @@ class TestWhereTheCallbackServerBinds(unittest.TestCase):
     Bound to loopback, a published container port is refused and `setup_auth`
     waits for a callback that cannot be delivered - with no timeout, so it
     hangs rather than failing. None of the other setup_auth tests observe the
-    address, so without these a one-line revert restores that silently.
+    address, so without these a hardcoded bind would pass unnoticed.
 
     The first two tests look redundant and are not: the first catches a bind
     hardcoded to `0.0.0.0`, which the patched test cannot see, and the second
