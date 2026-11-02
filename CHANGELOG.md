@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.11.0] - 2026-11-02
 
 ### Fixed
 
@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tool calls in one server no longer refresh the token at the same time. Two concurrent refreshes spent the same refresh token, and one could read the file while the other was saving it.
 - The credential files are replaced in one step rather than emptied and rewritten. Another server reading the token file while a token was being saved could find it empty or half-written. A save that failed part-way left it that way, after Monzo had already retired the refresh token it held. A reader now sees the old file or the new one, and a failed save leaves the old one in place. New files are still created owner-only on POSIX, and a symlinked file is saved where the link points. Saving now needs write access to the config directory. A token file mounted into a container on its own, rather than in its directory, cannot be renamed over, so mount the directory, as the README's commands do.
 - `monzo-mcp auth` reports a credential file it cannot save, and a failed code exchange, by the kind of error, instead of a traceback or the error's own text, which names paths on your machine.
+
+### Changed
+
+- `mcp` 2.3.0, up from 2.2.0.
+- The container image is built on Python 3.14.8.
 
 ## [0.10.0] - 2026-09-29
 
@@ -171,7 +176,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Transaction search across merchant name, description, and notes.
 - Pre-commit hook (`scripts/check-no-data.sh`) blocking commit of databases, tokens, and other secrets.
 
-[Unreleased]: https://github.com/partymola/monzo-mcp/compare/v0.10.0...HEAD
+[0.11.0]: https://github.com/partymola/monzo-mcp/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/partymola/monzo-mcp/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/partymola/monzo-mcp/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/partymola/monzo-mcp/compare/v0.7.0...v0.8.0
