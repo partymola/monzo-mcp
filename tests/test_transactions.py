@@ -5,6 +5,7 @@ client is mocked and the cache is in-memory SQLite, so no credentials or network
 are needed. Expected values are hand-derived from the fixtures.
 """
 
+import asyncio
 import json
 import pathlib
 import sqlite3
@@ -1048,8 +1049,18 @@ class TestEveryExitFromRunSyncLeavesARow(unittest.TestCase):
 
         raised, rows = self._statuses_after(fake_get)
         assert isinstance(raised, MonzoAuthError)
-        assert rows and rows[0][0] == "error"
+        assert rows and rows[0][0] == "auth_error"
         assert "MonzoAuthError" in rows[0][1]
+
+    def test_any_other_monzo_failure_on_the_account_lookup_is_an_error(self):
+        # Recorded as auth_error, an empty cache would send the user to
+        # re-authorise in answer to a dropped connection.
+        def fake_get(path):
+            raise MonzoAPIError("Network error. Check your connection.")
+
+        raised, rows = self._statuses_after(fake_get)
+        assert isinstance(raised, MonzoAPIError)
+        assert rows and rows[0][0] == "error"
 
     def test_an_argument_rejected_before_any_call_writes_nothing(self):
         """Deliberate, and the opposite of a hole.
@@ -1199,12 +1210,144 @@ class TestAnUnnamedFailureStillLeavesASyncLogRow(unittest.TestCase):
 
     def test_an_auth_failure_is_recorded_and_still_raised(self):
         rows = self._statuses_after(MonzoAuthError("Could not obtain an access token."))
-        assert rows and rows[0][0] == "error"
+        assert rows and rows[0][0] == "auth_error"
         assert "MonzoAuthError" in rows[0][1]
+
+    def test_any_other_unnamed_failure_is_recorded_as_an_error(self):
+        rows = self._statuses_after(KeyError("balance"))
+        assert rows and rows[0][0] == "error"
 
     def test_the_recorded_note_carries_no_response_content(self):
         rows = self._statuses_after(MonzoAuthError("/etc/secret/path"))
         assert "/etc/secret/path" not in rows[0][1]
+
+
+class TestAnEmptyCacheSaysWhy(unittest.TestCase):
+    """`monzo-mcp auth` replaces credentials that may still work, so only some states ask for it."""
+
+    SCA_ROW = ("ok", "accounts=1, dupes_removed=0, sca_required")
+    EXPECTED = {
+        None: "No transaction data available. No sync has run yet. Run monzo_sync.",
+        ("ok", ""): "No transaction data available. The last sync found none.",
+        ("error", ""): (
+            "No transaction data available. The last sync failed. "
+            "Run monzo_sync to retry and see why."
+        ),
+        # One account refused for SCA, another failed: the failure is what
+        # monzo_sync can show, so it answers.
+        ("error", "accounts=2, dupes_removed=0, sca_required"): (
+            "No transaction data available. The last sync failed. "
+            "Run monzo_sync to retry and see why."
+        ),
+        ("auth_error", ""): (
+            "No transaction data available. The stored credentials were refused or "
+            "cannot be used. Run monzo-mcp auth, then monzo_sync."
+        ),
+        SCA_ROW: (
+            "No transaction data available. Monzo needs the login approved in the "
+            "Monzo app. Run monzo-mcp auth, approve it in the app within 5 minutes, "
+            "then run monzo_sync."
+        ),
+    }
+
+    def _answer(self, tool, rows):
+        from monzo_mcp import helpers
+        from monzo_mcp.tools import analysis_tools
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = pathlib.Path(tmp.name) / "monzo.db"
+        setup = sqlite3.connect(db_path)
+        setup.executescript(SCHEMA)
+        for status, notes in rows:
+            setup.execute(
+                "INSERT INTO sync_log (synced_at, status, records_added, notes) "
+                "VALUES ('2026-01-01T00:00:00+00:00', ?, 0, ?)",
+                (status, notes),
+            )
+        setup.commit()
+        setup.close()
+
+        def open_db():
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        calls = {
+            "list": lambda: transaction_tools.monzo_list_transactions(),
+            "search": lambda: transaction_tools.monzo_search_transactions(query="Coffee"),
+            "spending": lambda: analysis_tools.monzo_spending(),
+        }
+        with tempfile.NamedTemporaryFile() as credentials:
+            exists = pathlib.Path(credentials.name)
+            with (
+                patch.object(helpers, "MONZO_CLIENT_PATH", exists),
+                patch.object(helpers, "MONZO_TOKENS_PATH", exists),
+                patch.object(transaction_tools, "auto_sync_if_stale", lambda: None),
+                patch.object(analysis_tools, "auto_sync_if_stale", lambda: None),
+                patch.object(transaction_tools, "get_db", open_db),
+                patch.object(analysis_tools, "get_db", open_db),
+            ):
+                return json.loads(asyncio.run(calls[tool]()))
+
+    def test_every_cache_reading_tool_says_why_from_the_last_sync(self):
+        for tool in ("list", "search", "spending"):
+            for row, expected in self.EXPECTED.items():
+                with self.subTest(tool=tool, row=row):
+                    rows = [] if row is None else [row]
+                    self.assertEqual(self._answer(tool, rows), {"error": expected})
+
+    def test_it_is_the_latest_sync_that_answers(self):
+        answer = self._answer("list", [self.SCA_ROW, ("auth_error", ""), ("error", "")])
+        self.assertEqual(answer, {"error": self.EXPECTED[("error", "")]})
+
+    def _row_after_a_sync_where(self, txns_for, accounts=({"id": "acc_1", "type": "uk_retail"},)):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = pathlib.Path(tmp.name) / "monzo.db"
+        db_conn = sqlite3.connect(db_path)
+        db_conn.executescript(SCHEMA)
+        _run(_FakeApi(list(accounts), txns_for), db_conn)
+        reopened = sqlite3.connect(db_path)
+        self.addCleanup(reopened.close)
+        return tuple(reopened.execute("SELECT status, notes FROM sync_log").fetchone())
+
+    def test_a_sync_refused_for_sca_marks_its_row(self):
+        def txns_for(acct, since, n):
+            raise MonzoSCAError("SCA required")
+
+        row = self._row_after_a_sync_where(txns_for)
+        self.assertEqual(row[0], "ok")
+        self.assertIn("sca_required", row[1])
+
+    def test_a_refusal_is_marked_whatever_else_the_details_hold(self):
+        # A login commonly carries a rewards account, skipped with a detail of
+        # its own; the mark must not need every detail to be a refusal. The
+        # refused one sits in the middle, so it is neither the first nor last.
+        def txns_for(acct, since, n):
+            if acct == "acc_1":
+                raise MonzoSCAError("SCA required")
+            return []
+
+        row = self._row_after_a_sync_where(
+            txns_for,
+            accounts=(
+                {"id": "acc_r", "type": "uk_rewards"},
+                {"id": "acc_1", "type": "uk_retail"},
+                {"id": "acc_j", "type": "uk_retail_joint"},
+            ),
+        )
+        self.assertEqual(row[0], "ok")
+        self.assertIn("sca_required", row[1])
+
+    def test_a_sync_that_fell_back_and_found_nothing_is_not_marked(self):
+        def txns_for(acct, since, n):
+            if n == 1:
+                raise MonzoSCAError("SCA required")
+            return []
+
+        row = self._row_after_a_sync_where(txns_for)
+        self.assertEqual(row, ("ok", "accounts=1, dupes_removed=0"))
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 import anyio
 
 from .. import api
-from ..api import MonzoAPIError, MonzoSCAError
+from ..api import MonzoAPIError, MonzoAuthError, MonzoSCAError
 from ..db import get_db, get_last_sync_attempt, log_sync, save_balance
 from ..helpers import (
     ACCOUNT_TYPES,
@@ -19,6 +19,11 @@ from ..helpers import (
 from ..mcp_instance import mcp
 
 logger = logging.getLogger(__name__)
+
+SCA_REQUIRED_NOTE = "SCA required - approve in Monzo app"
+# In the sync_log row's notes. An SCA refusal is logged ok, so the status
+# alone cannot tell an empty cache it was refused rather than empty.
+SCA_REQUIRED_MARK = "sca_required"
 
 
 def _format_transaction(row) -> dict:
@@ -190,7 +195,7 @@ def run_sync(account_type: str | None = None, since: str | None = None) -> dict:
                                     "Monzo refused the start date, fetched last 90 days only"
                                 )
                         except MonzoSCAError:
-                            detail["sca_note"] = "SCA required - approve in Monzo app"
+                            detail["sca_note"] = SCA_REQUIRED_NOTE
                             break
                         except MonzoAPIError as e:
                             # Only an SCA refusal earns the SCA note. Telling
@@ -201,7 +206,7 @@ def run_sync(account_type: str | None = None, since: str | None = None) -> dict:
                             break
                     else:
                         if sca:
-                            detail["sca_note"] = "SCA required - approve in Monzo app"
+                            detail["sca_note"] = SCA_REQUIRED_NOTE
                         else:
                             detail["transactions_error"] = str(page_error)
                         break
@@ -290,12 +295,10 @@ def run_sync(account_type: str | None = None, since: str | None = None) -> dict:
         # approving in the Monzo app changes the outcome.
         failed = [d for d in sync_details if d.get("transactions_error")]
         status = "error" if failed else "ok"
-        log_sync(
-            db,
-            status,
-            total_added,
-            f"accounts={accounts_synced}, dupes_removed={dupes}",
-        )
+        notes = f"accounts={accounts_synced}, dupes_removed={dupes}"
+        if any(d.get("sca_note") == SCA_REQUIRED_NOTE for d in sync_details):
+            notes += f", {SCA_REQUIRED_MARK}"
+        log_sync(db, status, total_added, notes)
 
         return {
             "accounts_synced": accounts_synced,
@@ -307,13 +310,40 @@ def run_sync(account_type: str | None = None, since: str | None = None) -> dict:
         # Type only: these paths carry API responses. Its own try, so a
         # database that cannot take the row does not replace the exception
         # that caused it.
+        status = "auth_error" if isinstance(e, MonzoAuthError) else "error"
         try:
-            log_sync(db, "error", 0, f"unexpected {type(e).__name__}")
+            log_sync(db, status, 0, f"unexpected {type(e).__name__}")
         except Exception:
             logger.error("Could not record a failed sync")
         raise
     finally:
         db.close()
+
+
+def no_transactions_error(db) -> dict:
+    """The answer to an empty cache, saying why from the last sync's row.
+
+    Only credentials that were refused or cannot be used, or an SCA refusal,
+    send the user to `monzo-mcp auth`, which replaces credentials that may
+    still work.
+    """
+    row = db.execute("SELECT status, notes FROM sync_log ORDER BY id DESC LIMIT 1").fetchone()
+    status = row[0] if row else None
+    if status == "ok" and SCA_REQUIRED_MARK in (row[1] or ""):
+        status = "sca_required"
+    reason = {
+        "auth_error": (
+            "The stored credentials were refused or cannot be used. "
+            "Run monzo-mcp auth, then monzo_sync."
+        ),
+        "sca_required": (
+            "Monzo needs the login approved in the Monzo app. Run monzo-mcp auth, "
+            "approve it in the app within 5 minutes, then run monzo_sync."
+        ),
+        "error": "The last sync failed. Run monzo_sync to retry and see why.",
+        "ok": "The last sync found none.",
+    }.get(status, "No sync has run yet. Run monzo_sync.")
+    return {"error": f"No transaction data available. {reason}"}
 
 
 def auto_sync_if_stale() -> None:
@@ -397,14 +427,7 @@ async def monzo_list_transactions(
         try:
             count = db.execute("SELECT COUNT(*) FROM monzo_transactions").fetchone()[0]
             if count == 0:
-                return format_response(
-                    {
-                        "error": (
-                            "No transaction data available. Check your Monzo auth "
-                            "with `monzo-mcp auth`."
-                        )
-                    }
-                )
+                return format_response(no_transactions_error(db))
 
             conditions = []
             params = []
@@ -482,14 +505,7 @@ async def monzo_search_transactions(
         try:
             count = db.execute("SELECT COUNT(*) FROM monzo_transactions").fetchone()[0]
             if count == 0:
-                return format_response(
-                    {
-                        "error": (
-                            "No transaction data available. Check your Monzo auth "
-                            "with `monzo-mcp auth`."
-                        )
-                    }
-                )
+                return format_response(no_transactions_error(db))
 
             conditions = [
                 "(merchant_name LIKE ? OR counterparty_name LIKE ? "

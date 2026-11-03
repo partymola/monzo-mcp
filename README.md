@@ -167,7 +167,7 @@ Older cached transactions gain fields added in newer versions (e.g. counterparty
 
 - **"SCA required" or only 90 days of history** - re-run `monzo-mcp auth` and approve the login in the Monzo app within 5 minutes, then sync straight away (see the SCA window above).
 - **Token expired / no refresh** - re-run `monzo-mcp auth` to re-authorise.
-- **"No transaction data available"** - the cache is empty; call `monzo_sync` (or any cache-reading tool, which auto-syncs) once after authenticating.
+- **"No transaction data available"** - the cache is empty, and the rest of the message says why. If it says the last sync failed, run `monzo_sync` to see the error. Run `monzo-mcp auth` only if it says the stored credentials were refused or cannot be used, or that the login needs approving in the Monzo app, and then call `monzo_sync` once.
 - **Every tool reports "not configured" under Docker, or authentication does not survive a restart** - nothing is mounted at `/data`. See [Docker](#docker); the same volume must be passed to the `auth` run and to the server.
 - **`auth` sits on "Waiting for callback..." after you approve** - the callback was not delivered. Press Ctrl-C and run it again. Under Docker, check the port is published (`-p 127.0.0.1:6600:6600`).
 

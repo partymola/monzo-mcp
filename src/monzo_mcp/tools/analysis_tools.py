@@ -7,7 +7,7 @@ import anyio
 from ..db import get_db
 from ..helpers import AccountType, format_response, parse_month, pence_to_pounds, require_auth
 from ..mcp_instance import mcp
-from .transaction_tools import auto_sync_if_stale
+from .transaction_tools import auto_sync_if_stale, no_transactions_error
 
 
 @mcp.tool()
@@ -40,14 +40,7 @@ async def monzo_spending(
         try:
             count = db.execute("SELECT COUNT(*) FROM monzo_transactions").fetchone()[0]
             if count == 0:
-                return format_response(
-                    {
-                        "error": (
-                            "No transaction data available. Check your Monzo auth "
-                            "with `monzo-mcp auth`."
-                        )
-                    }
-                )
+                return format_response(no_transactions_error(db))
 
             target_month = month or date.today().strftime("%Y-%m")
 
