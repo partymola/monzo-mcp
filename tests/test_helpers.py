@@ -30,6 +30,16 @@ class TestFormatResponse(unittest.TestCase):
         result = format_response("hello")
         self.assertEqual(json.loads(result), {"result": "hello"})
 
+    def test_a_reply_is_as_long_as_its_compact_json(self):
+        """Indented, its size grows with the square of its nesting."""
+        nested = [{"merchant": "Coffee Shop", "amount": -2.5}]
+        for _ in range(200):
+            nested = [{"items": nested}]
+        # A dict is what every tool returns; a list takes the same branch.
+        for reply in ({"transactions": nested}, nested):
+            with self.subTest(top=type(reply).__name__):
+                self.assertEqual(format_response(reply), json.dumps(reply))
+
 
 class TestPenceToPounds(unittest.TestCase):
     def test_positive(self):

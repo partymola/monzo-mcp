@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A sync whose first request for an account's transactions fails, other than by Monzo refusing its start date, reports a transaction error. It retried from the newest cached transaction, or from 90 days back on an empty cache, and logged the run as ok. On an empty cache it also said the SCA window had expired. A 5xx, a rate limit, a dropped connection or an unreadable answer is now an error, and the run is logged as one. A start Monzo refuses, with a 403 or a 400, still falls back as before. On an empty cache a 400 now says Monzo refused the start date, under `since_note`, rather than blaming the SCA window.
 - An empty cache no longer tells you to run `monzo-mcp auth` whatever the cause. `monzo_list_transactions`, `monzo_search_transactions` and `monzo_spending` now say what the last sync recorded: no sync yet, a sync that found nothing, a sync that failed, a login waiting for approval in the Monzo app, or stored credentials that were refused or cannot be used. Only the last two send you to `auth`, which re-authorises over a refresh token that may still work, and both then say to run `monzo_sync`. A sync ending in an authentication failure is now logged with status `auth_error`.
 
+### Changed
+
+- Tool results are compact JSON rather than indented. Indentation made a result's size grow with the square of its nesting, so a deeply nested reply could become megabytes. Only whitespace changes.
+
 ## [0.11.1] - 2026-11-03
 
 ### Packaging
