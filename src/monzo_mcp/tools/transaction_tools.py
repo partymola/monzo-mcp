@@ -166,7 +166,12 @@ def run_sync(account_type: str | None = None, since: str | None = None) -> dict:
                         f"/transactions?account_id={acct_id}&since={since}&limit=100&expand[]=merchant"
                     ).get("transactions", [])
                 except (MonzoSCAError, MonzoAPIError) as page_error:
-                    if page == 0:
+                    # Monzo refuses a start it will not serve, outside the SCA
+                    # window or beyond its history, with a 403 or a 400.
+                    # Anything else is a failure, not a reason to fetch less
+                    # and report success.
+                    sca = isinstance(page_error, MonzoSCAError)
+                    if page == 0 and (sca or page_error.status == 400):
                         last_sync = db.execute(
                             "SELECT MAX(created) FROM monzo_transactions WHERE account_id = ?",
                             (acct_id,),
@@ -178,8 +183,12 @@ def run_sync(account_type: str | None = None, since: str | None = None) -> dict:
                             txns = api.get(
                                 f"/transactions?account_id={acct_id}&since={fallback}&limit=100&expand[]=merchant"
                             ).get("transactions", [])
-                            if not last_sync:
+                            if not last_sync and sca:
                                 detail["sca_note"] = "SCA window expired, fetched last 90 days only"
+                            elif not last_sync:
+                                detail["since_note"] = (
+                                    "Monzo refused the start date, fetched last 90 days only"
+                                )
                         except MonzoSCAError:
                             detail["sca_note"] = "SCA required - approve in Monzo app"
                             break
@@ -191,7 +200,7 @@ def run_sync(account_type: str | None = None, since: str | None = None) -> dict:
                             detail["transactions_error"] = str(e)
                             break
                     else:
-                        if isinstance(page_error, MonzoSCAError):
+                        if sca:
                             detail["sca_note"] = "SCA required - approve in Monzo app"
                         else:
                             detail["transactions_error"] = str(page_error)

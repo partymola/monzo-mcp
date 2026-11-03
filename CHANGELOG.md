@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- A sync whose first request for an account's transactions fails, other than by Monzo refusing its start date, reports a transaction error. It retried from the newest cached transaction, or from 90 days back on an empty cache, and logged the run as ok. On an empty cache it also said the SCA window had expired. A 5xx, a rate limit, a dropped connection or an unreadable answer is now an error, and the run is logged as one. A start Monzo refuses, with a 403 or a 400, still falls back as before. On an empty cache a 400 now says Monzo refused the start date, under `since_note`, rather than blaming the SCA window.
+
 ## [0.11.1] - 2026-11-03
 
 ### Packaging

@@ -22,7 +22,11 @@ class MonzoSCAError(MonzoError):
 
 
 class MonzoAPIError(MonzoError):
-    """General API error."""
+    """General API error, with the HTTP status when Monzo answered with an error status."""
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 def get(path: str) -> dict:
@@ -57,7 +61,7 @@ def get(path: str) -> dict:
             raise MonzoAuthError("Access token invalid. Run: monzo-mcp auth") from e
         if e.code == 403:
             raise MonzoSCAError("SCA required - approve in Monzo app") from e
-        raise MonzoAPIError(f"Monzo API error {e.code}") from e
+        raise MonzoAPIError(f"Monzo API error {e.code}", status=e.code) from e
     except (OSError, http.client.HTTPException) as e:
         # URLError alone is too narrow: urlopen wraps only connect-phase
         # failures in it, so a read timeout or a reset connection arrives

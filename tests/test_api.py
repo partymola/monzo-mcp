@@ -172,10 +172,19 @@ class TestGetErrorMapping(unittest.TestCase):
             self._get_raising(_http_error(500))
         self.assertIn("500", str(ctx.exception))
 
+    def test_an_api_error_carries_the_status_monzo_answered_with(self):
+        """The sync falls back to a later start on a 400 and on nothing else."""
+        for code in (400, 429, 500):
+            with self.subTest(code=code):
+                with self.assertRaises(MonzoAPIError) as ctx:
+                    self._get_raising(_http_error(code))
+                self.assertEqual(ctx.exception.status, code)
+
     def test_network_error_maps_to_api_error(self):
         with self.assertRaises(MonzoAPIError) as ctx:
             self._get_raising(urllib.error.URLError("connection refused"))
         self.assertIn("Network error", str(ctx.exception))
+        self.assertIsNone(ctx.exception.status)
 
     def test_error_message_does_not_leak_response_body(self):
         # The 500 HTTPError carries a body; the raised message must expose only

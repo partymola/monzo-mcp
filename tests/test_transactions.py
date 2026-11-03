@@ -430,6 +430,7 @@ class TestScaFallback(unittest.TestCase):
         self.assertEqual(
             result["details"][0]["sca_note"], "SCA window expired, fetched last 90 days only"
         )
+        self.assertNotIn("since_note", result["details"][0])
         self.assertEqual(len(fake.txn_calls_for("acc_1")), 2)  # initial + fallback
 
     def test_sca_on_both_fetches_records_approval_note(self):
@@ -441,6 +442,92 @@ class TestScaFallback(unittest.TestCase):
 
         self.assertEqual(result["transactions_upserted"], 0)
         self.assertEqual(result["details"][0]["sca_note"], "SCA required - approve in Monzo app")
+
+
+class TestOnlyARefusedStartFallsBack(unittest.TestCase):
+    """Monzo refuses a start it will not serve with a 403 or a 400.
+
+    Any other failure fetching the first page is a failure. Retried from a
+    later start, it would report success over a narrower window, and with an
+    empty cache tell the user the SCA window had expired.
+    """
+
+    def _sync(self, first_page_error, cached=(), fallback_error=None):
+        db = _make_db()
+        for txn_id, created in cached:
+            db.execute(
+                "INSERT INTO monzo_transactions (id, account_id, account_type, created, amount) "
+                "VALUES (?, 'acc_1', 'personal', ?, -100)",
+                (txn_id, created),
+            )
+
+        def txns_for(acct, since, n):
+            if n == 1:
+                raise first_page_error
+            if n == 2 and fallback_error is not None:
+                raise fallback_error
+            if n == 2:
+                return [_mk("tx_fb", amount=-100, created="2026-02-01T10:00:00Z", settled="")]
+            return []
+
+        fake = _FakeApi([{"id": "acc_1", "type": "uk_retail"}], txns_for)
+        statuses = []
+        with patch.object(
+            transaction_tools, "log_sync", lambda _db, status, *_a: statuses.append(status)
+        ):
+            result = _run(fake, db)
+        return result["details"][0], fake.txn_calls_for("acc_1"), statuses
+
+    def test_a_failure_that_is_not_a_refusal_is_not_retried_from_a_later_start(self):
+        for error in (
+            MonzoAPIError("Monzo API error 503", status=503),
+            MonzoAPIError("Monzo API error 429", status=429),
+            MonzoAPIError("Network error. Check your connection."),
+            MonzoAPIError("Monzo returned an unreadable response."),
+        ):
+            with self.subTest(error=str(error)):
+                detail, calls, statuses = self._sync(error)
+                self.assertEqual(detail["transactions_error"], str(error))
+                self.assertNotIn("sca_note", detail)
+                self.assertNotIn("since_note", detail)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(statuses, ["error"])
+
+    def test_a_start_refused_with_a_400_falls_back_to_90_days(self):
+        detail, calls, statuses = self._sync(MonzoAPIError("Monzo API error 400", status=400))
+        self.assertEqual(
+            detail["since_note"], "Monzo refused the start date, fetched last 90 days only"
+        )
+        self.assertNotIn("sca_note", detail)
+        self.assertNotIn("transactions_error", detail)
+        self.assertEqual(detail["transactions_upserted"], 1)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(statuses, ["ok"])
+
+    def test_a_start_refused_with_a_400_resumes_from_the_newest_cached_row(self):
+        detail, calls, statuses = self._sync(
+            MonzoAPIError("Monzo API error 400", status=400),
+            cached=[("old", "2026-01-05T10:00:00Z")],
+        )
+        self.assertIn("since=2026-01-05T10:00:00Z", calls[1])
+        self.assertNotIn("since_note", detail)
+        self.assertNotIn("sca_note", detail)
+        self.assertEqual(statuses, ["ok"])
+
+    def test_a_fallback_that_fails_otherwise_is_a_failure_not_an_sca_prompt(self):
+        for refusal in (
+            MonzoSCAError("SCA required"),
+            MonzoAPIError("Monzo API error 400", status=400),
+        ):
+            with self.subTest(refusal=str(refusal)):
+                detail, calls, statuses = self._sync(
+                    refusal, fallback_error=MonzoAPIError("Monzo API error 503", status=503)
+                )
+                self.assertEqual(detail["transactions_error"], "Monzo API error 503")
+                self.assertNotIn("sca_note", detail)
+                self.assertNotIn("since_note", detail)
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(statuses, ["error"])
 
 
 class TestAccountSelection(unittest.TestCase):
@@ -567,9 +654,11 @@ class TestAccountSelection(unittest.TestCase):
             patch.object(transaction_tools.api, "get", fake.get),
             patch.object(transaction_tools, "get_db", return_value=db_conn),
         ):
-            transaction_tools.run_sync()
+            result = transaction_tools.run_sync()
 
         self.assertIn("since=2026-01-01T10:00:00Z", fake.txn_calls_for("acc_p")[-1])
+        # It resumed from the cache, so there is no 90-day window to report.
+        self.assertNotIn("sca_note", result["details"][0])
 
 
 class TestAnUnreadableResponseIsNotAnSCAPrompt(unittest.TestCase):
@@ -617,7 +706,7 @@ class TestAnUnreadableResponseIsNotAnSCAPrompt(unittest.TestCase):
 
     def test_an_sca_error_is_still_reported_as_sca(self):
         result, _ = self._run_with_transactions_failing(MonzoSCAError("SCA"))
-        assert "SCA" in result["details"][0]["sca_note"]
+        assert result["details"][0]["sca_note"] == "SCA required - approve in Monzo app"
 
     def test_a_failed_sync_is_not_logged_as_ok(self):
         _, statuses = self._run_with_transactions_failing(
@@ -697,6 +786,32 @@ class TestALaterPageFailingIsAlsoAFailure(unittest.TestCase):
 
         assert "transactions_error" in result["details"][0]
         assert statuses == ["error"]
+
+    def test_a_refused_start_on_a_later_page_is_not_a_fallback(self):
+        # A 400 past the first page is not a start Monzo refused: retried from
+        # the newest cached row, it would log a gap in the history as ok.
+        full_page = [
+            _mk(f"tx_{i}", amount=-100, created=f"2026-03-{i % 28 + 1:02d}T10:00:00Z", settled="s")
+            for i in range(100)
+        ]
+
+        def txns_for(acct, since, n):
+            if n == 1:
+                return full_page
+            if n == 2:
+                raise MonzoAPIError("Monzo API error 400", status=400)
+            return []
+
+        fake = _FakeApi([{"id": "acc_1", "type": "uk_retail"}], txns_for)
+        statuses = []
+        with patch.object(
+            transaction_tools, "log_sync", lambda _db, status, *_a: statuses.append(status)
+        ):
+            result = _run(fake, _make_db())
+
+        assert result["details"][0]["transactions_error"] == "Monzo API error 400"
+        assert statuses == ["error"]
+        assert len(fake.txn_calls_for("acc_1")) == 2
 
 
 class TestTheAutoSyncThrottleCountsAttempts(unittest.TestCase):
@@ -1043,7 +1158,7 @@ class TestSCAIsNotAFailureOnAnyPage(unittest.TestCase):
 
     def test_sca_on_a_later_page_is_a_note_not_an_error(self):
         detail, statuses = self._run_with_sca_on_page(1)
-        assert "SCA" in detail["sca_note"]
+        assert detail["sca_note"] == "SCA required - approve in Monzo app"
         assert "transactions_error" not in detail
         assert statuses == ["ok"]
 
