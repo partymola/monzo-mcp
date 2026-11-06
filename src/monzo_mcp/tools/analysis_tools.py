@@ -10,7 +10,7 @@ from ..mcp_instance import mcp
 from .transaction_tools import auto_sync_if_stale, no_transactions_error
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 @require_auth
 async def monzo_spending(
     month: str | None = None,

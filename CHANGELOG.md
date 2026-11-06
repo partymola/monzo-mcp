@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Tool results are sent as text only. Each also carried the same JSON again as escaped structured content, which some clients, Claude Code among them, show the model in place of the text. That copy is longer than the text by its `{"result": ...}` wrapper and by one character for every quotation mark and backslash. Tools no longer declare an output schema, so a client that read `structuredContent` must read the text content instead.
+
 ## [0.12.0] - 2026-11-04
 
 ### Fixed

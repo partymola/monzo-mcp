@@ -42,7 +42,7 @@ def _resolve_account_id(account_type: str) -> tuple[str, str]:
     raise AccountNotFound(f"No open {account_type} account found")
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 @require_auth
 async def monzo_list_accounts() -> str:
     """List all Monzo accounts with their types and IDs.
@@ -65,7 +65,7 @@ async def monzo_list_accounts() -> str:
     return format_response(accounts)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 @require_auth
 async def monzo_get_balance(account_type: AccountType = "personal") -> str:
     """Get current balance for a Monzo account.
@@ -102,7 +102,7 @@ async def monzo_get_balance(account_type: AccountType = "personal") -> str:
     return format_response(result)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 @require_auth
 async def monzo_list_pots(account_type: AccountType = "personal") -> str:
     """List all pots (savings buckets) for a Monzo account.

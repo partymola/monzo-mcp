@@ -367,7 +367,7 @@ def auto_sync_if_stale() -> None:
         pass
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 @require_auth
 async def monzo_sync(account_type: AccountType | None = None, since: str | None = None) -> str:
     """Sync transactions, balances, and pots from the Monzo API into the local cache.
@@ -387,7 +387,7 @@ async def monzo_sync(account_type: AccountType | None = None, since: str | None 
     return format_response(result)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 @require_auth
 async def monzo_list_transactions(
     account_type: AccountType | None = None,
@@ -467,7 +467,7 @@ async def monzo_list_transactions(
     return await anyio.to_thread.run_sync(_query)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 @require_auth
 async def monzo_search_transactions(
     query: str,
